@@ -1,0 +1,28 @@
+{
+  "name": "funil-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:api": "tsc -p tsconfig.server.json",
+    "prestart": "npm run build:api",
+    "start:api": "node dist/api/server.js",
+    "start": "npm run start:api"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "helmet": "^8.0.0",
+    "stripe": "^19.0.0",
+    "@supabase/supabase-js": "^2.78.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.3",
+    "@types/node": "^22.15.30",
+    "@types/express": "^4.17.21"
+  }
+}
