@@ -14,7 +14,6 @@ import authRoutes from './routes/auth.js'
 import stripeRoutes from './routes/stripe.js'
 import paypalRoutes from './routes/paypal.js'
 import leadsRoutes from './routes/leads.js'
-import debugRoutes from './routes/debug.js'
 
 // for esm mode (reserved)
 
@@ -37,7 +36,6 @@ app.use('/api/auth', authRoutes)
 app.use('/api/stripe', stripeRoutes)
 app.use('/api/paypal', paypalRoutes)
 app.use('/api/leads', leadsRoutes)
-app.use('/api/debug', debugRoutes)
 
 app.use(
   '/static/audio-upsell',

@@ -4,7 +4,7 @@
 import express, { Router, type Request, type Response } from 'express'
 import Stripe from 'stripe'
 import dotenv from 'dotenv'
-import { sendEventViaPhp } from '../lib/phpCapi.js'
+import { buildMetaPurchasePayload, sendMetaPurchaseEvent } from '../lib/metaCapi.js'
 
 // ensure env is loaded before accessing process.env
 dotenv.config()
@@ -556,24 +556,19 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
       const fbp = (pi.metadata?.fbp as string | undefined) || undefined
       const fbc = (pi.metadata?.fbc as string | undefined) || undefined
       const uaMeta = (pi.metadata?.ua as string | undefined) || (pi.metadata?.user_agent as string | undefined) || null
-      const testEventCode = (pi.metadata?.test_event_code as string | undefined) || undefined
-      const email = pi.receipt_email || undefined
-
-      // Disparar CAPI via PHP (Centralizado)
-      const payload = {
+      const payload = buildMetaPurchasePayload({
         event_id: `stripe:${pi.id}`,
+        event_time: Math.floor((event.created || Date.now()) / 1),
         event_source_url: srcUrl,
-        fbp: fbp || undefined,
-        fbc: fbc || undefined,
-        user_agent: uaMeta || undefined,
+        fbp: fbp || null,
+        fbc: fbc || null,
+        user_agent: uaMeta,
+        ip_address: null,
         currency,
         value: amount,
-        email: email || undefined,
-        test_event_code: testEventCode || undefined
-      }
-      
-      const resp = await sendEventViaPhp(payload)
-      console.log('[STRIPE] CAPI disparado via PHP', { success: resp.success, php_event_id: resp.event_id })
+      })
+      const resp = await sendMetaPurchaseEvent(payload)
+      console.log('[STRIPE] CAPI disparado via webhook', { success: resp.success, status: resp.status })
     }
     res.status(200).json({ success: true })
   } catch (error: unknown) {

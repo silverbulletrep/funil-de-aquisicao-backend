@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express'
 import dotenv from 'dotenv'
 import axios from 'axios'
-import { sendEventViaPhp } from '../lib/phpCapi.js'
+import { buildMetaPurchasePayload, sendMetaPurchaseEvent } from '../lib/metaCapi.js'
 
 dotenv.config()
 
@@ -93,8 +93,8 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
       return
     }
     const valueCents = Math.round(valueNum * 100)
-    const allowedEUR = [100, 2400, 3700, 4700] // 100 = 1.00 EUR (Teste)
-    const allowedBRL = [100, 990, 1470, 1980] // 100 = 1.00 BRL (Teste)
+    const allowedEUR = [2400, 3700, 4700]
+    const allowedBRL = [990, 1470, 1980]
     if ((currency === 'EUR' && !allowedEUR.includes(valueCents)) || (currency === 'BRL' && !allowedBRL.includes(valueCents))) {
       res.status(400).json({ success: false, error: 'Valor selecionado inválido' })
       return
@@ -103,9 +103,6 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
     const returnBase = (req.headers.origin && String(req.headers.origin)) || FRONTEND_URL
     const base = String(returnBase).replace(/\/$/, '')
     const origin = String((dados_entrada.metadata?.origin || 'fim')).toLowerCase()
-    const testEventCode = dados_entrada.metadata?.test_event_code || ''
-    const customId = `origin=${encodeURIComponent(origin)}&test_event_code=${encodeURIComponent(testEventCode)}`
-    
     const body = {
       intent: 'CAPTURE',
       purchase_units: [
@@ -114,7 +111,7 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
             currency_code: dados_entrada.currency,
             value: dados_entrada.value,
           },
-          custom_id: customId,
+          custom_id: `origin=${encodeURIComponent(origin)}`,
         },
       ],
       application_context: {
@@ -201,12 +198,8 @@ router.post('/capture-order', async (req: Request, res: Response): Promise<void>
       }
       const pu = (Array.isArray(json?.purchase_units) ? (json.purchase_units[0] as PayPalPurchaseUnit) : null)
       const customId = String(pu?.custom_id || '')
-      
-      // Parse custom_id (querystring style)
-      const params = new URLSearchParams(customId)
-      const origin = params.get('origin') || 'fim'
-      const testEventCode = params.get('test_event_code') || undefined
-
+      const originMatch = /^origin=([^&]+)/.exec(customId)
+      const origin = decodeURIComponent(originMatch ? originMatch[1] : 'fim')
       if (status === 'COMPLETED' && pu) {
         const currency = String(
           pu?.payments?.captures?.[0]?.amount?.currency_code || pu?.amount?.currency_code || 'EUR',
@@ -218,22 +211,21 @@ router.post('/capture-order', async (req: Request, res: Response): Promise<void>
         const base = process.env.FRONTEND_URL || 'http://localhost:3002'
         const srcUrl = `${String(base).replace(/\/$/, '')}${String(origin).includes('upsell') ? '/audio-upsell' : '/fim'}`
         const ua = String(req.headers['user-agent'] || '') || null
-        
-        // Disparar CAPI via PHP (Centralizado)
-        const payload = {
+        const ipHeader = (req.headers['x-forwarded-for'] as string | undefined) || ''
+        const ip = (ipHeader.split(',').shift() || '').trim() || null
+        const payload = buildMetaPurchasePayload({
           event_id: `paypal:${json?.id || orderId}`,
+          event_time: new Date(),
           event_source_url: srcUrl,
-          fbp: (typeof req.body?.fbp === 'string') ? req.body.fbp : undefined,
-          fbc: (typeof req.body?.fbc === 'string') ? req.body.fbc : undefined,
-          user_agent: ua || undefined,
+          user_agent: ua,
+          ip_address: ip,
+          fbp: (typeof req.body?.fbp === 'string') ? req.body.fbp : null,
+          fbc: (typeof req.body?.fbc === 'string') ? req.body.fbc : null,
           currency,
           value,
-          test_event_code: testEventCode,
-          email: undefined // PayPal geralmente retorna no payer info, mas aqui simplificamos
-        }
-        
-        const respCapi = await sendEventViaPhp(payload)
-        console.log('[PAYPAL] CAPI disparado via PHP', { success: respCapi.success, php_event_id: respCapi.event_id })
+        })
+        const respCapi = await sendMetaPurchaseEvent(payload)
+        console.log('[PAYPAL] CAPI disparado no capture', { success: respCapi.success, status: respCapi.status })
       }
     } catch (capErr: unknown) {
       const e = capErr as { message?: string }
