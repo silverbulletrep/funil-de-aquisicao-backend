@@ -88,39 +88,15 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
     const currency = String(dados_entrada.currency).toUpperCase()
     const valueStr = String(dados_entrada.value)
     const valueNum = Number(valueStr)
-    
-    // Log detalhado para depuração de valor (Solicitação A)
-    console.log('[PAYPAL] Validando valor:', { 
-      recebido_raw: dados_entrada.value, 
-      convertido_str: valueStr, 
-      convertido_num: valueNum,
-      is_finite: Number.isFinite(valueNum) 
-    })
-
     if (!Number.isFinite(valueNum)) {
       res.status(400).json({ success: false, error: 'Valor inválido' })
       return
     }
     const valueCents = Math.round(valueNum * 100)
-    
-    // Valores permitidos em centavos
     const allowedEUR = [100, 2400, 3700, 4700] // 100 = 1.00 EUR (Teste)
     const allowedBRL = [100, 990, 1470, 1980] // 100 = 1.00 BRL (Teste)
-    
-    const isAllowedEUR = currency === 'EUR' && allowedEUR.includes(valueCents)
-    const isAllowedBRL = currency === 'BRL' && allowedBRL.includes(valueCents)
-
-    if (!isAllowedEUR && !isAllowedBRL) {
-      console.warn('[PAYPAL] Valor rejeitado:', { 
-        currency, 
-        valueCents, 
-        allowedEUR, 
-        allowedBRL 
-      })
-      res.status(400).json({ 
-        success: false, 
-        error: `Valor selecionado inválido: ${valueNum} ${currency} não é uma opção permitida.` 
-      })
+    if ((currency === 'EUR' && !allowedEUR.includes(valueCents)) || (currency === 'BRL' && !allowedBRL.includes(valueCents))) {
+      res.status(400).json({ success: false, error: 'Valor selecionado inválido' })
       return
     }
     const token = await getAccessToken()
