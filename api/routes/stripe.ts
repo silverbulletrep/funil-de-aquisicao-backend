@@ -5,6 +5,7 @@ import express, { Router, type Request, type Response } from 'express'
 import Stripe from 'stripe'
 import dotenv from 'dotenv'
 import { buildMetaPurchasePayload, sendMetaPurchaseEvent } from '../lib/metaCapi.js'
+import { sendPurchaseToN8N } from '../lib/n8n.js'
 
 // ensure env is loaded before accessing process.env
 dotenv.config()
@@ -22,6 +23,40 @@ const STRIPE_SECRET_KEY =
   process.env.STRIPE
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3002'
 let stripe: Stripe | null = null
+
+async function sendPurchaseToMetaCAPI(payload: Parameters<typeof buildMetaPurchasePayload>[0]) {
+  const operacao = 'stripe.meta_capi_purchase'
+  const dados_entrada = { event_id: payload.event_id }
+  try {
+    console.log(`[STRIPE] Iniciando operação: ${operacao}`, { dados_entrada })
+    console.log('[STRIPE] Payload CAPI (raw)', {
+      event_id: payload.event_id,
+      event_time: payload.event_time,
+      event_source_url: payload.event_source_url,
+      fbp: payload.fbp,
+      fbc: payload.fbc,
+      hasEmail: !!payload.email,
+      hasPhone: !!payload.phone,
+      first_name: payload.first_name,
+      last_name: payload.last_name,
+      city: payload.city,
+      state: payload.state,
+      zip: payload.zip,
+      country: payload.country,
+      external_id: payload.external_id,
+      currency: payload.currency,
+      value: payload.value,
+      order_id: payload.order_id,
+    })
+    const resp = await sendMetaPurchaseEvent(buildMetaPurchasePayload(payload))
+    console.log('[STRIPE] CAPI disparado com sucesso', { success: resp.success, status: resp.status })
+    return resp
+  } catch (err: unknown) {
+    const e = err as { message?: string }
+    console.error('[STRIPE] Erro ao enviar CAPI', { message: e?.message })
+    return { success: false, error: e?.message || 'Falha ao enviar CAPI' }
+  }
+}
 
 try {
   const isValidKey = /^(sk_(live|test)_[A-Za-z0-9]+)/.test(STRIPE_SECRET_KEY || '')
@@ -69,6 +104,12 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
     const normalizedBase = redirectBase.replace(/\/$/, '')
     const rawMetadata = (req.body?.metadata || {}) as Record<string, string | number | boolean | null | undefined>
     const sanitizedMetadata: Record<string, string> = sanitizeMetadata(rawMetadata)
+    const ipHeader = (req.headers['x-forwarded-for'] as string | undefined) || ''
+    const ip = (ipHeader.split(',').shift() || '').trim()
+    const uaHeader = String(req.headers['user-agent'] || '')
+    const metaWithInfra: Record<string, string> = { ...sanitizedMetadata }
+    if (ip && !metaWithInfra.ip_address) metaWithInfra.ip_address = ip
+    if (uaHeader && !metaWithInfra.user_agent && !metaWithInfra.ua) metaWithInfra.user_agent = uaHeader
     const variantParam = sanitizedMetadata.variant ? `&variant=${encodeURIComponent(sanitizedMetadata.variant)}` : ''
     const successUrl = `${normalizedBase}/checkout-success?session_id={CHECKOUT_SESSION_ID}${variantParam}`
     const cancelUrl = `${normalizedBase}/checkout-cancel`
@@ -87,7 +128,7 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
     // Sanitiza metadata (já obtida acima)
 
     // Whitelist de valores permitidos (em centavos)
-    const allowedAmountsBRL = [100, 990, 1000, 1470, 1980]
+    const allowedAmountsBRL = [100, 990, 1470, 1980]
     const requestedAmount = Number(req.body?.amount_cents)
     const requestedCurrency = (req.body?.currency || '').toLowerCase()
 
@@ -108,14 +149,14 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
       }
       unitAmount = requestedAmount
     } else if (currency === 'eur') {
-      const allowedAmountsEUR = [100, 3700, 2400, 4700]
+      const allowedAmountsEUR = [3700, 2400, 4700]
       if (!Number.isFinite(requestedAmount) || !allowedAmountsEUR.includes(requestedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (EUR)', {
           requestedAmount,
           allowedAmountsEUR,
           timestamp: new Date().toISOString(),
         })
-        res.status(400).json({ success: false, error: `Valor selecionado inválido (EUR) [DEBUG: ${requestedAmount}]` })
+        res.status(400).json({ success: false, error: 'Valor selecionado inválido (EUR)' })
         return
       }
       unitAmount = requestedAmount
@@ -156,20 +197,21 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
         cancel_url: cancelUrl,
         locale: 'de',
         billing_address_collection: 'auto',
+        phone_number_collection: { enabled: true },
         customer_email: dados_entrada.email || undefined,
         payment_intent_data: {
           metadata: {
             source: 'vsl2',
             selected_currency: currency,
             selected_amount_cents: String(unitAmount),
-            ...sanitizedMetadata,
+            ...metaWithInfra,
           },
         },
         metadata: {
           source: 'vsl2',
           selected_currency: currency,
           selected_amount_cents: String(unitAmount),
-          ...sanitizedMetadata,
+          ...metaWithInfra,
         },
       })
     } catch (pmErr: unknown) {
@@ -199,20 +241,21 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
         cancel_url: cancelUrl,
         locale: 'de',
         billing_address_collection: 'auto',
+        phone_number_collection: { enabled: true },
         customer_email: dados_entrada.email || undefined,
         payment_intent_data: {
           metadata: {
             source: 'vsl2',
             selected_currency: currency,
             selected_amount_cents: String(unitAmount),
-            ...sanitizedMetadata,
+            ...metaWithInfra,
           },
         },
         metadata: {
           source: 'vsl2',
           selected_currency: currency,
           selected_amount_cents: String(unitAmount),
-          ...sanitizedMetadata,
+          ...metaWithInfra,
         },
       })
     }
@@ -282,7 +325,7 @@ router.get('/health', async (req: Request, res: Response): Promise<void> => {
       key_prefix: key ? key.slice(0, 7) : null,
       frontend_url: FRONTEND_URL,
       currencies: ['brl', 'eur', 'usd'],
-      allowed: { brl: [100, 990, 1000, 1470, 1980], eur: [100, 3700, 2400, 4700], usd: [5999] },
+      allowed: { brl: [990, 1470, 1980], eur: [3700, 2400, 4700], usd: [5999] },
       message: ready
         ? 'Stripe pronto'
         : 'Stripe não configurado: defina STRIPE_SECRET_KEY com chave sk_* válida',
@@ -384,6 +427,14 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
 
   try {
     console.log(`[STRIPE] Iniciando operação: criar_payment_intent`, { dados_entrada })
+    console.log('[STRIPE] Body recebido no payment-intent', {
+      hasBody: !!req.body,
+      bodyKeys: req.body ? Object.keys(req.body) : [],
+      emailBody: req.body?.email,
+      amount_cents: req.body?.amount_cents,
+      currency: req.body?.currency,
+      metadataKeys: req.body?.metadata ? Object.keys(req.body.metadata) : [],
+    })
 
     if (!stripe) {
       console.error('[STRIPE] Erro na operação: SDK não inicializado. Verifique STRIPE_SECRET_KEY', {
@@ -397,23 +448,21 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
     // Sanitiza metadata
     const rawMetadata = (req.body?.metadata || {}) as Record<string, string | number | boolean | null | undefined>
     const sanitizedMetadata: Record<string, string> = sanitizeMetadata(rawMetadata)
+    const ipHeader = (req.headers['x-forwarded-for'] as string | undefined) || ''
+    const ip = (ipHeader.split(',').shift() || '').trim()
+    const uaHeader = String(req.headers['user-agent'] || '')
+    const metaWithInfra: Record<string, string> = { ...sanitizedMetadata }
+    if (ip && !metaWithInfra.ip_address) metaWithInfra.ip_address = ip
+    if (uaHeader && !metaWithInfra.user_agent && !metaWithInfra.ua) metaWithInfra.user_agent = uaHeader
 
     // Whitelist de valores permitidos (em centavos)
-    const allowedAmountsBRL = [100, 990, 1000, 1470, 1980]
-    const allowedAmountsEUR = [100, 3700, 2400, 4700]
+    const allowedAmountsBRL = [990, 1470, 1980]
+    const allowedAmountsEUR = [3700, 2400, 4700]
     const requestedAmount = Number(req.body?.amount_cents)
     const requestedCurrency = (req.body?.currency || '').toLowerCase()
 
     // Define moeda: prioriza BRL/EUR; fallback para USD
     const currency = requestedCurrency === 'brl' ? 'brl' : (requestedCurrency === 'eur' ? 'eur' : 'usd')
-
-    console.log('[DEBUG] Validando PaymentIntent:', {
-      requestedAmount,
-      requestedCurrency,
-      currencyParsed: currency,
-      allowedBRL: allowedAmountsBRL,
-      isAllowed: currency === 'brl' ? allowedAmountsBRL.includes(requestedAmount) : 'N/A'
-    })
 
     // Validação de amount conforme moeda
     let unitAmount = 0
@@ -435,7 +484,7 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
           allowedAmountsEUR,
           timestamp: new Date().toISOString(),
         })
-        res.status(400).json({ success: false, error: `Valor selecionado inválido (EUR) [DEBUG: ${requestedAmount}]` })
+        res.status(400).json({ success: false, error: 'Valor selecionado inválido (EUR)' })
         return
       }
       unitAmount = requestedAmount
@@ -444,18 +493,28 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
       unitAmount = 5999
     }
 
-    const preferredPaymentMethodTypes: Stripe.PaymentIntentCreateParams['payment_method_types'] = currency === 'brl'
-      ? ['card']
-      : [
-        'card',
-        'sepa_debit',
-        'sofort',
-        'giropay',
-        'klarna',
-      ]
+    const preferredPaymentMethodTypes: Stripe.PaymentIntentCreateParams['payment_method_types'] = [
+      'card',
+      'sepa_debit',
+      'sofort',
+      'giropay',
+      'klarna',
+    ]
 
     let intent: Stripe.PaymentIntent
     try {
+      console.log('[STRIPE] Criando PaymentIntent', {
+        amount: unitAmount,
+        currency,
+        preferredPaymentMethodTypes,
+        receipt_email: dados_entrada.email || null,
+        metadata: {
+          source: 'vsl2',
+          selected_currency: currency,
+          selected_amount_cents: String(unitAmount),
+          ...metaWithInfra,
+        },
+      })
       intent = await stripe.paymentIntents.create({
         amount: unitAmount,
         currency,
@@ -465,7 +524,7 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
           source: 'vsl2',
           selected_currency: currency,
           selected_amount_cents: String(unitAmount),
-          ...sanitizedMetadata,
+          ...metaWithInfra,
         },
         receipt_email: dados_entrada.email || undefined,
       })
@@ -485,7 +544,7 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
           source: 'vsl2',
           selected_currency: currency,
           selected_amount_cents: String(unitAmount),
-          ...sanitizedMetadata,
+          ...metaWithInfra,
         },
         receipt_email: dados_entrada.email || undefined,
       })
@@ -525,6 +584,162 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
   }
 })
 
+router.post('/finalize', async (req: Request, res: Response): Promise<void> => {
+  const operacao = 'stripe.finalize'
+  console.log('[STRIPE] HIT do finalize', { body: req.body, headers: req.headers['content-type'] })
+  const paymentIntentId = String(req.body?.payment_intent_id || req.body?.payment_intent || '').trim()
+  const dados_entrada = { payment_intent_id: paymentIntentId }
+  try {
+    console.log(`[STRIPE] Iniciando operação: ${operacao}`, { dados_entrada })
+
+
+    console.log('[STRIPE] Body recebido no finalize', {
+      hasBody: !!req.body,
+      bodyKeys: req.body ? Object.keys(req.body) : [],
+      emailBody: req.body?.email,
+      phoneBody: req.body?.phone,
+      fbp: req.body?.fbp,
+      fbc: req.body?.fbc,
+      event_source_url: req.body?.event_source_url,
+    })
+    if (!stripe) {
+      console.error('[STRIPE] SDK não inicializado', { dados_entrada })
+      res.status(500).json({ success: false, error: 'Stripe não configurado' })
+      return
+    }
+    if (!paymentIntentId) {
+      res.status(400).json({ success: false, error: 'payment_intent_id é obrigatório' })
+      return
+    }
+    const pi = (await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['charges.data.billing_details', 'customer'] })) as Stripe.PaymentIntent
+    const piWithCharges = pi as Stripe.PaymentIntent & { charges?: Stripe.ApiList<Stripe.Charge> }
+    const charge = (piWithCharges.charges?.data && piWithCharges.charges.data.length) ? piWithCharges.charges.data[0] : null
+    const customerObj = (pi.customer && typeof pi.customer === 'object' && !('deleted' in pi.customer && pi.customer.deleted))
+      ? (pi.customer as Stripe.Customer)
+      : null
+    const emailFromBody = typeof req.body?.email === 'string' ? req.body.email : null
+    const phoneFromBody = typeof req.body?.phone === 'string' ? req.body.phone : null
+    console.log('[STRIPE] Extração de email no finalize', {
+      receipt_email: pi.receipt_email,
+      billing_email: charge?.billing_details?.email,
+      customer_email: customerObj?.email,
+      emailFromBody,
+      hasBody: !!req.body,
+      bodyKeys: req.body ? Object.keys(req.body) : []
+    })
+    const email = (pi.receipt_email || charge?.billing_details?.email || customerObj?.email || emailFromBody || null) as string | null
+    const phone = (charge?.billing_details?.phone || customerObj?.phone || phoneFromBody || null) as string | null
+    const name = (charge?.billing_details?.name || pi.shipping?.name || customerObj?.name || '') as string
+    const nameParts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    const firstName = nameParts.length ? nameParts[0] : null
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null
+    const address = (charge?.billing_details?.address || pi.shipping?.address || null) as Stripe.Address | null
+    const ipHeader = (req.headers['x-forwarded-for'] as string | undefined) || ''
+    const ip = (ipHeader.split(',').shift() || '').trim() || null
+    const uaBody = typeof req.body?.user_agent === 'string' ? req.body.user_agent : ''
+    const uaHeader = String(req.headers['user-agent'] || '')
+    const userAgent = uaBody || uaHeader || null
+    const eventSourceUrl = typeof req.body?.event_source_url === 'string' && req.body.event_source_url.trim()
+      ? req.body.event_source_url
+      : `${String(process.env.FRONTEND_URL || 'http://localhost:3002').replace(/\/$/, '')}/fim`
+    const amountCents = (pi.amount_received || pi.amount || 0)
+    const value = amountCents ? amountCents / 100 : 0
+    const currency = String(pi.currency || '').toUpperCase()
+    const capiDispatched = String((pi.metadata && pi.metadata.capi_dispatched) || '').toLowerCase() === 'true'
+    const n8nAlready = String((pi.metadata && pi.metadata.n8n_dispatched) || '').toLowerCase() === 'true'
+    const metaEventId = typeof pi.metadata?.event_id === 'string' ? String(pi.metadata.event_id) : ''
+    const eventId = metaEventId || `stripe:${pi.id}`
+    console.log('[STRIPE] Contexto do finalize', {
+      eventId,
+      metaEventId,
+      capiDispatched,
+      n8nAlready,
+      eventSourceUrl,
+      currency,
+      value,
+      hasEmail: !!email,
+      hasPhone: !!phone,
+      ip,
+      userAgent: userAgent ? true : false,
+    })
+    let capiResp: { success: boolean; status?: number; error?: string } = { success: false }
+    if (!capiDispatched) {
+      try {
+        console.log('[STRIPE] Enviando CAPI no finalize', {
+          event_id: eventId,
+          event_source_url: eventSourceUrl,
+          fbp: (typeof req.body?.fbp === 'string') ? req.body.fbp : null,
+          fbc: (typeof req.body?.fbc === 'string') ? req.body.fbc : null,
+          hasEmail: !!email,
+          hasPhone: !!phone,
+          currency,
+          value,
+          order_id: pi.id,
+        })
+        capiResp = await sendPurchaseToMetaCAPI({
+          event_id: eventId,
+          event_time: pi.created || Math.floor(Date.now() / 1000),
+          event_source_url: eventSourceUrl,
+          fbp: (typeof req.body?.fbp === 'string') ? req.body.fbp : null,
+          fbc: (typeof req.body?.fbc === 'string') ? req.body.fbc : null,
+          user_agent: userAgent,
+          ip_address: ip,
+          email,
+          phone,
+          first_name: firstName,
+          last_name: lastName,
+          city: address?.city || null,
+          state: address?.state || null,
+          zip: address?.postal_code || null,
+          country: address?.country || null,
+          external_id: typeof pi.customer === 'string' ? pi.customer : (customerObj?.id || null),
+          currency,
+          value,
+          order_id: pi.id,
+        })
+        console.log('[STRIPE] Retorno CAPI no finalize', { success: capiResp?.success, status: capiResp?.status, error: capiResp?.error })
+      } catch (capiErr: unknown) {
+        const e = capiErr as { message?: string }
+        console.error('[STRIPE] Erro ao enviar CAPI no finalize', { message: e?.message })
+      }
+    } else {
+      console.log('[STRIPE] CAPI já havia sido enviado', { eventId, capiDispatched })
+    }
+    let n8nDispatched = false
+    console.log('[STRIPE] Verificando envio para n8n', { email, n8nAlready, shouldSend: !!(email && !n8nAlready) })
+    if (email && !n8nAlready) {
+      try {
+        console.log('[STRIPE] Enviando email para n8n', { email })
+        n8nDispatched = await sendPurchaseToN8N(email)
+        console.log('[STRIPE] Resultado do envio para n8n', { n8nDispatched })
+      } catch (n8nErr: unknown) {
+        const e = n8nErr as { message?: string }
+        console.error('[STRIPE] Erro ao enviar n8n no finalize', { message: e?.message })
+      }
+    } else {
+      console.log('[STRIPE] n8n não enviado', { hasEmail: !!email, n8nAlready })
+    }
+    try {
+      const nextMeta: Record<string, string> = { ...pi.metadata }
+      if (capiResp?.success || capiDispatched) nextMeta.capi_dispatched = 'true'
+      if (n8nDispatched || n8nAlready) nextMeta.n8n_dispatched = 'true'
+      await stripe.paymentIntents.update(pi.id, { metadata: nextMeta })
+    } catch (metaErr: unknown) {
+      const e = metaErr as { message?: string }
+      console.warn('[STRIPE] Falha ao atualizar metadata no finalize', { message: e?.message })
+    }
+    res.status(200).json({ success: true })
+  } catch (error: unknown) {
+    const e = error as Error & { stack?: string }
+    console.error(`[STRIPE] Erro na operação: ${operacao}: ${e.message}`, {
+      dados_entrada,
+      stack: e.stack,
+      timestamp: new Date().toISOString(),
+    })
+    res.status(500).json({ success: false, error: e.message || 'Falha no finalize do Stripe' })
+  }
+})
+
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req: Request, res: Response): Promise<void> => {
   const operacao = 'stripe.webhook'
   const dados_entrada = { signature: req.headers['stripe-signature'] ? true : false }
@@ -547,7 +762,15 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
       return
     }
     if (event.type === 'payment_intent.succeeded') {
-      const pi = event.data.object as Stripe.PaymentIntent
+      const piBase = event.data.object as Stripe.PaymentIntent
+      let pi = piBase as Stripe.PaymentIntent
+      try {
+        pi = (await stripe.paymentIntents.retrieve(piBase.id, { expand: ['charges.data.billing_details', 'customer'] })) as Stripe.PaymentIntent
+      } catch {
+        pi = piBase as Stripe.PaymentIntent
+      }
+      const capiDispatched = String((pi.metadata && pi.metadata.capi_dispatched) || '').toLowerCase() === 'true'
+      const n8nAlready = String((pi.metadata && pi.metadata.n8n_dispatched) || '').toLowerCase() === 'true'
       const amount = (pi.amount_received || pi.amount || 0) / 100
       const currency = String(pi.currency || '').toUpperCase()
       const origin = String((pi.metadata?.origin || pi.metadata?.source || 'fim')).toLowerCase()
@@ -556,19 +779,65 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
       const fbp = (pi.metadata?.fbp as string | undefined) || undefined
       const fbc = (pi.metadata?.fbc as string | undefined) || undefined
       const uaMeta = (pi.metadata?.ua as string | undefined) || (pi.metadata?.user_agent as string | undefined) || null
-      const payload = buildMetaPurchasePayload({
-        event_id: `stripe:${pi.id}`,
-        event_time: Math.floor((event.created || Date.now()) / 1),
-        event_source_url: srcUrl,
-        fbp: fbp || null,
-        fbc: fbc || null,
-        user_agent: uaMeta,
-        ip_address: null,
-        currency,
-        value: amount,
-      })
-      const resp = await sendMetaPurchaseEvent(payload)
-      console.log('[STRIPE] CAPI disparado via webhook', { success: resp.success, status: resp.status })
+      const ipMeta = (pi.metadata?.ip_address as string | undefined) || null
+      const piWithCharges = pi as Stripe.PaymentIntent & { charges?: Stripe.ApiList<Stripe.Charge> }
+      const charge = (piWithCharges.charges?.data && piWithCharges.charges.data.length) ? piWithCharges.charges.data[0] : null
+      const customerObj = (pi.customer && typeof pi.customer === 'object' && !('deleted' in pi.customer && pi.customer.deleted))
+        ? (pi.customer as Stripe.Customer)
+        : null
+      const email = (pi.receipt_email || charge?.billing_details?.email || customerObj?.email || null) as string | null
+      const phone = (charge?.billing_details?.phone || customerObj?.phone || null) as string | null
+      const name = (charge?.billing_details?.name || pi.shipping?.name || customerObj?.name || '') as string
+      const nameParts = String(name || '').trim().split(/\s+/).filter(Boolean)
+      const firstName = nameParts.length ? nameParts[0] : null
+      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null
+      const address = (charge?.billing_details?.address || pi.shipping?.address || null) as Stripe.Address | null
+      const metaEventId = typeof pi.metadata?.event_id === 'string' ? String(pi.metadata.event_id) : ''
+      const eventId = metaEventId || `stripe:${pi.id}`
+      let capiResp: { success: boolean; status?: number; error?: string } = { success: false }
+      if (!capiDispatched) {
+        try {
+          capiResp = await sendPurchaseToMetaCAPI({
+            event_id: eventId,
+            event_time: Math.floor((event.created || Date.now()) / 1),
+            event_source_url: srcUrl,
+            fbp: fbp || null,
+            fbc: fbc || null,
+            user_agent: uaMeta,
+            ip_address: ipMeta,
+            email,
+            phone,
+            first_name: firstName,
+            last_name: lastName,
+            city: address?.city || null,
+            state: address?.state || null,
+            zip: address?.postal_code || null,
+            country: address?.country || null,
+            external_id: typeof pi.customer === 'string' ? pi.customer : (customerObj?.id || null),
+            currency,
+            value: amount,
+            order_id: pi.id,
+          })
+        } catch (capiErr: unknown) {
+          const e = capiErr as { message?: string }
+          console.error('[STRIPE] Erro ao enviar CAPI no webhook', { message: e?.message })
+        }
+      }
+      let n8nDispatched = false
+      if (email && !n8nAlready) {
+        n8nDispatched = await sendPurchaseToN8N(email)
+      }
+      if (capiResp.success || n8nDispatched) {
+        try {
+          const nextMeta: Record<string, string> = { ...pi.metadata }
+          if (capiResp.success || capiDispatched) nextMeta.capi_dispatched = 'true'
+          if (n8nDispatched || n8nAlready) nextMeta.n8n_dispatched = 'true'
+          await stripe.paymentIntents.update(pi.id, { metadata: nextMeta })
+        } catch (metaErr: unknown) {
+          const e = metaErr as { message?: string }
+          console.warn('[STRIPE] Falha ao atualizar metadata no webhook', { message: e?.message })
+        }
+      }
     }
     res.status(200).json({ success: true })
   } catch (error: unknown) {
