@@ -23,6 +23,30 @@ const STRIPE_SECRET_KEY =
   process.env.STRIPE
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3002'
 let stripe: Stripe | null = null
+function parseFrontendUrlList(value: string): string[] {
+  const raw = String(value || '').trim()
+  return raw
+    .split(/[,\s]+/g)
+    .map((s) => s.trim())
+    .filter((s) => /^https?:\/\//i.test(s))
+}
+
+function normalizeAllowedAmount(rawAmount: number, allowed: number[]): number {
+  if (!Number.isFinite(rawAmount)) return rawAmount
+  if (allowed.includes(rawAmount)) return rawAmount
+  const scaled = Math.round(rawAmount * 100)
+  if (allowed.includes(scaled)) return scaled
+  return rawAmount
+}
+function pickFrontendBase(isLiveKey: boolean): string {
+  const list = parseFrontendUrlList(FRONTEND_URL)
+  if (!list.length) return String(FRONTEND_URL || 'http://localhost:3002').replace(/\/$/, '')
+  if (isLiveKey) {
+    const https = list.find((u) => u.toLowerCase().startsWith('https://'))
+    return String(https || list[0]).replace(/\/$/, '')
+  }
+  return String(list[0]).replace(/\/$/, '')
+}
 
 async function sendPurchaseToMetaCAPI(payload: Parameters<typeof buildMetaPurchasePayload>[0]) {
   const operacao = 'stripe.meta_capi_purchase'
@@ -100,8 +124,8 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
     const isLiveKey = (STRIPE_SECRET_KEY || '').startsWith('sk_live')
     const originIsHttp = typeof originHeader === 'string' && originHeader.startsWith('http://')
     const preferOrigin = typeof originHeader === 'string' && originHeader.trim().length > 0 && (!isLiveKey || !originIsHttp)
-    const redirectBase = preferOrigin ? originHeader as string : FRONTEND_URL
-    const normalizedBase = redirectBase.replace(/\/$/, '')
+    const redirectBase = preferOrigin ? (originHeader as string) : pickFrontendBase(isLiveKey)
+    const normalizedBase = String(redirectBase).replace(/\/$/, '')
     const rawMetadata = (req.body?.metadata || {}) as Record<string, string | number | boolean | null | undefined>
     const sanitizedMetadata: Record<string, string> = sanitizeMetadata(rawMetadata)
     const ipHeader = (req.headers['x-forwarded-for'] as string | undefined) || ''
@@ -138,28 +162,32 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
     // Validação de amount conforme moeda
     let unitAmount = 0
     if (currency === 'brl') {
-      if (!Number.isFinite(requestedAmount) || !allowedAmountsBRL.includes(requestedAmount)) {
+      const normalizedAmount = normalizeAllowedAmount(requestedAmount, allowedAmountsBRL)
+      if (!Number.isFinite(normalizedAmount) || !allowedAmountsBRL.includes(normalizedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (BRL)', {
           requestedAmount,
+          normalizedAmount,
           allowedAmountsBRL,
           timestamp: new Date().toISOString(),
         })
         res.status(400).json({ success: false, error: 'Valor selecionado inválido (BRL)' })
         return
       }
-      unitAmount = requestedAmount
+      unitAmount = normalizedAmount
     } else if (currency === 'eur') {
       const allowedAmountsEUR = [3700, 2400, 4700]
-      if (!Number.isFinite(requestedAmount) || !allowedAmountsEUR.includes(requestedAmount)) {
+      const normalizedAmount = normalizeAllowedAmount(requestedAmount, allowedAmountsEUR)
+      if (!Number.isFinite(normalizedAmount) || !allowedAmountsEUR.includes(normalizedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (EUR)', {
           requestedAmount,
+          normalizedAmount,
           allowedAmountsEUR,
           timestamp: new Date().toISOString(),
         })
         res.status(400).json({ success: false, error: 'Valor selecionado inválido (EUR)' })
         return
       }
-      unitAmount = requestedAmount
+      unitAmount = normalizedAmount
     } else {
       // Fallback USD: mantém valor existente caso não use BRL/EUR
       unitAmount = 5999
@@ -325,7 +353,7 @@ router.get('/health', async (req: Request, res: Response): Promise<void> => {
       key_prefix: key ? key.slice(0, 7) : null,
       frontend_url: FRONTEND_URL,
       currencies: ['brl', 'eur', 'usd'],
-      allowed: { brl: [990, 1470, 1980], eur: [3700, 2400, 4700], usd: [5999] },
+      allowed: { brl: [100, 990, 1470, 1980], eur: [3700, 2400, 4700], usd: [5999] },
       message: ready
         ? 'Stripe pronto'
         : 'Stripe não configurado: defina STRIPE_SECRET_KEY com chave sk_* válida',
@@ -456,7 +484,7 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
     if (uaHeader && !metaWithInfra.user_agent && !metaWithInfra.ua) metaWithInfra.user_agent = uaHeader
 
     // Whitelist de valores permitidos (em centavos)
-    const allowedAmountsBRL = [990, 1470, 1980]
+    const allowedAmountsBRL = [100, 990, 1470, 1980]
     const allowedAmountsEUR = [3700, 2400, 4700]
     const requestedAmount = Number(req.body?.amount_cents)
     const requestedCurrency = (req.body?.currency || '').toLowerCase()
@@ -467,27 +495,31 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
     // Validação de amount conforme moeda
     let unitAmount = 0
     if (currency === 'brl') {
-      if (!Number.isFinite(requestedAmount) || !allowedAmountsBRL.includes(requestedAmount)) {
+      const normalizedAmount = normalizeAllowedAmount(requestedAmount, allowedAmountsBRL)
+      if (!Number.isFinite(normalizedAmount) || !allowedAmountsBRL.includes(normalizedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (BRL)', {
           requestedAmount,
+          normalizedAmount,
           allowedAmountsBRL,
           timestamp: new Date().toISOString(),
         })
         res.status(400).json({ success: false, error: 'Valor selecionado inválido' })
         return
       }
-      unitAmount = requestedAmount
+      unitAmount = normalizedAmount
     } else if (currency === 'eur') {
-      if (!Number.isFinite(requestedAmount) || !allowedAmountsEUR.includes(requestedAmount)) {
+      const normalizedAmount = normalizeAllowedAmount(requestedAmount, allowedAmountsEUR)
+      if (!Number.isFinite(normalizedAmount) || !allowedAmountsEUR.includes(normalizedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (EUR)', {
           requestedAmount,
+          normalizedAmount,
           allowedAmountsEUR,
           timestamp: new Date().toISOString(),
         })
         res.status(400).json({ success: false, error: 'Valor selecionado inválido (EUR)' })
         return
       }
-      unitAmount = requestedAmount
+      unitAmount = normalizedAmount
     } else {
       // Fallback USD: valor padrão
       unitAmount = 5999
