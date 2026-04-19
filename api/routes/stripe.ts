@@ -739,10 +739,11 @@ router.post('/finalize', async (req: Request, res: Response): Promise<void> => {
     }
     let n8nDispatched = false
     console.log('[STRIPE] Verificando envio para n8n', { email, n8nAlready, shouldSend: !!(email && !n8nAlready) })
+    const leadId = typeof pi.metadata?.lead_id === 'string' ? pi.metadata.lead_id : undefined;
     if (email && !n8nAlready) {
       try {
-        console.log('[STRIPE] Enviando email para n8n', { email })
-        n8nDispatched = await sendPurchaseToN8N(email)
+        console.log('[STRIPE] Enviando email para n8n', { email, leadId })
+        n8nDispatched = await sendPurchaseToN8N(email, leadId)
         console.log('[STRIPE] Resultado do envio para n8n', { n8nDispatched })
       } catch (n8nErr: unknown) {
         const e = n8nErr as { message?: string }
@@ -856,8 +857,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
         }
       }
       let n8nDispatched = false
+      const leadId = typeof pi.metadata?.lead_id === 'string' ? pi.metadata.lead_id : undefined;
       if (email && !n8nAlready) {
-        n8nDispatched = await sendPurchaseToN8N(email)
+        n8nDispatched = await sendPurchaseToN8N(email, leadId)
       }
       if (capiResp.success || n8nDispatched) {
         try {

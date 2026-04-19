@@ -11,10 +11,10 @@ const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS) || 20000
  * @param email Email do cliente
  * @returns true se sucesso, false caso contrário
  */
-export async function sendPurchaseToN8N(email: string): Promise<boolean> {
+export async function sendPurchaseToN8N(email: string, lead_id?: string): Promise<boolean> {
     try {
-        // Payload simples conforme solicitado pelo usuário: { email }
-        const payload = { email }
+        const payload: Record<string, any> = { email }
+        if (lead_id) payload.lead_id = lead_id;
 
         console.log('[N8N] Enviando webhook...', {
             url: N8N_WEBHOOK_URL,

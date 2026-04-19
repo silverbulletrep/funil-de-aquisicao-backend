@@ -119,6 +119,10 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
     const returnBase = (req.headers.origin && String(req.headers.origin)) || FRONTEND_URL
     const base = String(returnBase).replace(/\/$/, '')
     const origin = String((dados_entrada.metadata?.origin || 'fim')).toLowerCase()
+    const leadId = typeof dados_entrada.metadata?.lead_id === 'string' ? dados_entrada.metadata.lead_id : ''
+    const customParams = new URLSearchParams()
+    customParams.set('origin', origin)
+    if (leadId) customParams.set('lead_id', leadId)
     const body = {
       intent: 'CAPTURE',
       purchase_units: [
@@ -127,7 +131,7 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
             currency_code: dados_entrada.currency,
             value: dados_entrada.value,
           },
-          custom_id: `origin=${encodeURIComponent(origin)}`,
+          custom_id: customParams.toString(),
         },
       ],
       application_context: {
@@ -343,8 +347,11 @@ router.post('/finalize-email', async (req: Request, res: Response): Promise<void
     }
     const pu = (Array.isArray(json?.purchase_units) ? (json.purchase_units[0] as PayPalPurchaseUnit) : null)
     const customId = String(pu?.custom_id || '')
-    const originMatch = /^origin=([^&]+)/.exec(customId)
-    const origin = decodeURIComponent(originMatch ? originMatch[1] : 'fim')
+    let origin = 'fim'
+    let customLeadId = ''
+    const parsedParams = new URLSearchParams(customId)
+    if (parsedParams.has('origin')) origin = parsedParams.get('origin') || 'fim'
+    if (parsedParams.has('lead_id')) customLeadId = parsedParams.get('lead_id') || ''
     const currency = String(
       pu?.payments?.captures?.[0]?.amount?.currency_code || pu?.amount?.currency_code || 'EUR',
     )
@@ -395,7 +402,7 @@ router.post('/finalize-email', async (req: Request, res: Response): Promise<void
     }
     let n8nDispatched = false
     try {
-      n8nDispatched = await sendPurchaseToN8N(email)
+      n8nDispatched = await sendPurchaseToN8N(email, customLeadId || undefined)
     } catch (n8nErr: unknown) {
       const e = n8nErr as { message?: string }
       console.error('[PAYPAL] Erro ao enviar n8n no finalize-email', { message: e?.message })
