@@ -109,7 +109,7 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
       return
     }
     const valueCents = Math.round(valueNum * 100)
-    const allowedEUR = [2400, 3700, 4700]
+    const allowedEUR = [2400, 3300, 3700, 4700]
     const allowedBRL = [100, 990, 1470, 1980]
     if ((currency === 'EUR' && !allowedEUR.includes(valueCents)) || (currency === 'BRL' && !allowedBRL.includes(valueCents))) {
       res.status(400).json({ success: false, error: 'Valor selecionado inválido' })

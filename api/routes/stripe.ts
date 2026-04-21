@@ -175,7 +175,7 @@ router.post('/checkout-session', async (req: Request, res: Response): Promise<vo
       }
       unitAmount = normalizedAmount
     } else if (currency === 'eur') {
-      const allowedAmountsEUR = [3700, 2400, 4700]
+      const allowedAmountsEUR = [2400, 3300, 3700, 4700]
       const normalizedAmount = normalizeAllowedAmount(requestedAmount, allowedAmountsEUR)
       if (!Number.isFinite(normalizedAmount) || !allowedAmountsEUR.includes(normalizedAmount)) {
         console.error('[STRIPE] Amount inválido ou não permitido (EUR)', {
@@ -353,7 +353,7 @@ router.get('/health', async (req: Request, res: Response): Promise<void> => {
       key_prefix: key ? key.slice(0, 7) : null,
       frontend_url: FRONTEND_URL,
       currencies: ['brl', 'eur', 'usd'],
-      allowed: { brl: [100, 990, 1470, 1980], eur: [3700, 2400, 4700], usd: [5999] },
+      allowed: { brl: [100, 990, 1470, 1980], eur: [2400, 3300, 3700, 4700], usd: [5999] },
       message: ready
         ? 'Stripe pronto'
         : 'Stripe não configurado: defina STRIPE_SECRET_KEY com chave sk_* válida',
@@ -485,7 +485,7 @@ router.post('/payment-intent', async (req: Request, res: Response): Promise<void
 
     // Whitelist de valores permitidos (em centavos)
     const allowedAmountsBRL = [100, 990, 1470, 1980]
-    const allowedAmountsEUR = [3700, 2400, 4700]
+    const allowedAmountsEUR = [2400, 3300, 3700, 4700]
     const requestedAmount = Number(req.body?.amount_cents)
     const requestedCurrency = (req.body?.currency || '').toLowerCase()
 
