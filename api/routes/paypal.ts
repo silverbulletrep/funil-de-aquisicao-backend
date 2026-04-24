@@ -33,6 +33,15 @@ async function sendPurchaseToMetaCAPI(payload: Parameters<typeof buildMetaPurcha
   }
 }
 
+function resolvePurchaseDetails(origin: string, variant?: string) {
+    const isUpsell = String(origin || '').includes('upsell') || String(variant || '').toLowerCase() === 'audio_upsell';
+    return {
+        journey_type: (isUpsell ? 'upsell' : 'front') as 'front' | 'upsell' | 'recovery',
+        product_id: (isUpsell ? 'elevate_up01' : 'elevate_front') as 'elevate_front' | 'elevate_up01',
+        checkout_origin: origin || 'fim'
+    };
+}
+
 async function getAccessToken(): Promise<string> {
   const operacao = 'paypal.oauth_token'
   const { PAYPAL_CLIENT_ID, PAYPAL_SECRET, API_BASE, PAYPAL_ENV } = getEnv()
@@ -120,9 +129,11 @@ router.post('/create-order', async (req: Request, res: Response): Promise<void> 
     const base = String(returnBase).replace(/\/$/, '')
     const origin = String((dados_entrada.metadata?.origin || 'fim')).toLowerCase()
     const leadId = typeof dados_entrada.metadata?.lead_id === 'string' ? dados_entrada.metadata.lead_id : ''
+    const variant = typeof dados_entrada.metadata?.variant === 'string' ? dados_entrada.metadata.variant : ''
     const customParams = new URLSearchParams()
     customParams.set('origin', origin)
     if (leadId) customParams.set('lead_id', leadId)
+    if (variant) customParams.set('variant', variant)
     const body = {
       intent: 'CAPTURE',
       purchase_units: [
@@ -402,7 +413,18 @@ router.post('/finalize-email', async (req: Request, res: Response): Promise<void
     }
     let n8nDispatched = false
     try {
-      n8nDispatched = await sendPurchaseToN8N(email, customLeadId || undefined)
+      const variant = parsedParams.get('variant') || undefined
+      const details = resolvePurchaseDetails(origin, variant)
+
+      console.log('[PAYPAL] Enviando webhook enriquecido para n8n', { email, leadId: customLeadId, details })
+      n8nDispatched = await sendPurchaseToN8N({
+        email,
+        lead_id: customLeadId || undefined,
+        gross_revenue: value,
+        currency,
+        provider: 'paypal',
+        ...details
+      })
     } catch (n8nErr: unknown) {
       const e = n8nErr as { message?: string }
       console.error('[PAYPAL] Erro ao enviar n8n no finalize-email', { message: e?.message })

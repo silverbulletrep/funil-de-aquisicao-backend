@@ -6,17 +6,25 @@ dotenv.config()
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || 'https://n8n-n8n.6jcwzd.easypanel.host/webhook/producao'
 const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS) || 20000
 
+export interface N8NPurchasePayload {
+  email: string
+  lead_id?: string
+  journey_type: 'front' | 'upsell' | 'recovery'
+  gross_revenue: number
+  currency: string
+  provider: 'stripe' | 'paypal'
+  product_id: 'elevate_front' | 'elevate_up01'
+  checkout_origin: string
+}
+
 /**
- * Envia o email de compra para o webhook do N8N.
- * @param email Email do cliente
+ * Envia o evento de compra enriquecido para o webhook do N8N.
+ * @param payload Objeto contendo os dados da compra e do cliente
  * @returns true se sucesso, false caso contrário
  */
-export async function sendPurchaseToN8N(email: string, lead_id?: string): Promise<boolean> {
+export async function sendPurchaseToN8N(payload: N8NPurchasePayload): Promise<boolean> {
     try {
-        const payload: Record<string, any> = { email }
-        if (lead_id) payload.lead_id = lead_id;
-
-        console.log('[N8N] Enviando webhook...', {
+        console.log('[N8N] Enviando webhook enriquecido...', {
             url: N8N_WEBHOOK_URL,
             payload
         })

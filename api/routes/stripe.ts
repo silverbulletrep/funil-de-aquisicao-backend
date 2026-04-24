@@ -82,6 +82,15 @@ async function sendPurchaseToMetaCAPI(payload: Parameters<typeof buildMetaPurcha
   }
 }
 
+function resolvePurchaseDetails(origin: string, variant?: string) {
+    const isUpsell = String(origin || '').includes('upsell') || String(variant || '').toLowerCase() === 'audio_upsell';
+    return {
+        journey_type: (isUpsell ? 'upsell' : 'front') as 'front' | 'upsell' | 'recovery',
+        product_id: (isUpsell ? 'elevate_up01' : 'elevate_front') as 'elevate_front' | 'elevate_up01',
+        checkout_origin: origin || 'fim'
+    };
+}
+
 try {
   const isValidKey = /^(sk_(live|test)_[A-Za-z0-9]+)/.test(STRIPE_SECRET_KEY || '')
   if (!isValidKey) {
@@ -742,8 +751,19 @@ router.post('/finalize', async (req: Request, res: Response): Promise<void> => {
     const leadId = typeof pi.metadata?.lead_id === 'string' ? pi.metadata.lead_id : undefined;
     if (email && !n8nAlready) {
       try {
-        console.log('[STRIPE] Enviando email para n8n', { email, leadId })
-        n8nDispatched = await sendPurchaseToN8N(email, leadId)
+        const origin = String((pi.metadata?.origin || pi.metadata?.source || 'fim')).toLowerCase()
+        const variant = pi.metadata?.variant as string | undefined
+        const details = resolvePurchaseDetails(origin, variant)
+
+        console.log('[STRIPE] Enviando webhook enriquecido para n8n', { email, leadId, details })
+        n8nDispatched = await sendPurchaseToN8N({
+          email,
+          lead_id: leadId,
+          gross_revenue: value,
+          currency: currency as string,
+          provider: 'stripe',
+          ...details
+        })
         console.log('[STRIPE] Resultado do envio para n8n', { n8nDispatched })
       } catch (n8nErr: unknown) {
         const e = n8nErr as { message?: string }
@@ -859,7 +879,22 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req: R
       let n8nDispatched = false
       const leadId = typeof pi.metadata?.lead_id === 'string' ? pi.metadata.lead_id : undefined;
       if (email && !n8nAlready) {
-        n8nDispatched = await sendPurchaseToN8N(email, leadId)
+        try {
+          const variant = pi.metadata?.variant as string | undefined
+          const details = resolvePurchaseDetails(origin, variant)
+
+          n8nDispatched = await sendPurchaseToN8N({
+            email,
+            lead_id: leadId,
+            gross_revenue: amount,
+            currency: currency as string,
+            provider: 'stripe',
+            ...details
+          })
+        } catch (n8nErr: unknown) {
+          const e = n8nErr as { message?: string }
+          console.error('[STRIPE] Erro ao enviar n8n no webhook', { message: e?.message })
+        }
       }
       if (capiResp.success || n8nDispatched) {
         try {
