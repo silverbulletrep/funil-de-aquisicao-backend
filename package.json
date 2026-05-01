@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build:api": "tsc -p tsconfig.server.json",
-    "test:api": "npm run build:api && node --test dist/api/lib/__tests__/recoveryDispatcher.test.js",
+    "test:api": "npm run build:api && node --test dist/api/lib/__tests__/*.test.js",
     "prestart": "npm run build:api",
     "start:api": "node dist/api/server.js",
     "start": "npm run start:api"
