@@ -113,6 +113,38 @@ test('resolveRecoveryTemplateValues reads desire subpaths and mapped values', ()
   assert.equal(resolution.values['{{2}}'], 'Riqueza')
 })
 
+test('resolveRecoveryTemplateValues supports desire.response[1] when available', () => {
+  const lookup = makeLookup({
+    template: {
+      ...makeLookup().template,
+      variable_definitions: [
+        { token: '{{1}}', index: 1, label: 'Nome', required: true },
+        { token: '{{2}}', index: 2, label: 'Segundo desejo', required: true },
+      ],
+    },
+    bindings: [
+      makeLookup().bindings[0],
+      {
+        ...makeLookup().bindings[1],
+        token: '{{2}}',
+        source_key: 'desire.response[1]',
+        source_label: 'Segundo desejo',
+        resolution_mode: 'pass_through',
+        value_map: {},
+      },
+    ],
+  })
+
+  const resolution = resolveRecoveryTemplateValues(
+    makeLead(),
+    lookup.template.variable_definitions,
+    lookup.bindings,
+  )
+
+  assert.deepEqual(resolution.issues, [])
+  assert.equal(resolution.values['{{2}}'], 'liberdade')
+})
+
 test('resolveRecoveryTemplateValues falls back for mapped_value when there is no match', () => {
   const lookup = makeLookup({
     bindings: [
