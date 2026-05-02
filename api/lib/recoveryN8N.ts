@@ -23,10 +23,12 @@ export async function sendRecoveryTemplateToN8N(
     console.log('[RECOVERY_N8N] Enviando payload de recovery', {
       lead_id: payload.lead_id,
       message_type: payload.message_type,
+      destination: payload.destination,
       country: payload.country,
       language: payload.language,
-      has_phone: !!payload.phone,
-      has_email: !!payload.email,
+      template_id: payload.metadata.template_id,
+      meta_template_id: payload.metadata.meta_template_id,
+      variable_count: payload.metadata.template_variable_definitions.length,
     })
 
     const response = await axios.post(N8N_META_TEMPLATE_WEBHOOK_URL, payload, {

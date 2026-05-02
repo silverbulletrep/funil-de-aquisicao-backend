@@ -6,6 +6,22 @@ export const RECOVERY_MESSAGE_TYPES = [
 
 export type RecoveryMessageType = typeof RECOVERY_MESSAGE_TYPES[number]
 
+export const RECOVERY_TEMPLATE_SOURCE_KEYS = [
+  'name',
+  'email',
+  'phone',
+  'age',
+  'gender',
+  'country',
+  'auto_tag',
+  'desire.question',
+  'desire.response[0]',
+  'desire.response[1]',
+] as const
+
+export type RecoveryTemplateSourceKey = typeof RECOVERY_TEMPLATE_SOURCE_KEYS[number]
+export type RecoveryTemplateResolutionMode = 'pass_through' | 'mapped_value'
+
 export type RecoveryDispatchStatus =
   | 'dry_run'
   | 'sent'
@@ -15,6 +31,9 @@ export type RecoveryDispatchStatus =
   | 'unknown_language'
   | 'ineligible_missing_phone'
   | 'not_due'
+  | 'missing_template_route'
+  | 'missing_template_config'
+  | 'missing_required_template_variable'
 
 export interface RecoveryDispatchTrigger {
   event_id: string | null
@@ -23,6 +42,49 @@ export interface RecoveryDispatchTrigger {
   payment_type: string | null
   step_id?: string | null
   page_path?: string | null
+}
+
+export interface RecoveryTemplateVariableDefinition {
+  token: string
+  index: number
+  label: string
+  example?: string
+  required: boolean
+}
+
+export interface RecoveryTemplateBinding {
+  token: string
+  source_key: RecoveryTemplateSourceKey
+  source_label: string
+  resolution_mode: RecoveryTemplateResolutionMode
+  value_map: Record<string, string>
+  fallback_value: string | null
+  required: boolean
+}
+
+export interface RecoveryTemplateRoute {
+  route_id: string
+  message_type: RecoveryMessageType
+  country: string
+  template_id: string
+  is_active: boolean
+  metadata: Record<string, unknown> | null
+}
+
+export interface RecoveryMessageTemplate {
+  template_id: string
+  name: string | null
+  template_category: 'inicializacao' | 'conversa' | null
+  meta_template_id: string | null
+  meta_language: string | null
+  meta_payload: Record<string, unknown> | null
+  variable_definitions: RecoveryTemplateVariableDefinition[]
+}
+
+export interface RecoveryTemplateLookupResult {
+  route: RecoveryTemplateRoute
+  template: RecoveryMessageTemplate
+  bindings: RecoveryTemplateBinding[]
 }
 
 export interface RecoveryCandidate {
@@ -61,6 +123,7 @@ export interface RecoverySkippedLead {
 export interface RecoveryN8NPayload {
   lead_id: string
   message_type: RecoveryMessageType
+  destination: string
   country: string
   language: 'pt' | 'de' | 'unknown'
   phone: string
@@ -68,6 +131,16 @@ export interface RecoveryN8NPayload {
   name: string | null
   funnel_id: string
   trigger: RecoveryDispatchTrigger
+  metadata: {
+    template_id: string
+    meta_template_id: string | null
+    template_name: string | null
+    template_category: 'inicializacao' | 'conversa' | null
+    meta_language: string | null
+    meta_payload: Record<string, unknown> | null
+    template_variable_definitions: RecoveryTemplateVariableDefinition[]
+    template_variable_values: Record<string, string>
+  }
 }
 
 export interface RecoveryN8NSendResult {
@@ -95,6 +168,7 @@ export interface CompactLeadRow {
   age?: string | number | null
   gender?: string | null
   country?: string | null
+  desire?: Record<string, unknown> | null
   has_purchase?: boolean | null
   last_event_at?: string | null
   perfil_image?: string | null

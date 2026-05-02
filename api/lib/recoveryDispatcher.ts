@@ -1,4 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import {
+  getRecoveryTemplateSourceLabel,
+  isRecoveryTemplateSourceKey,
+} from './recoveryTemplateCatalog.js'
+import { buildRecoveryTemplatePayload } from './recoveryTemplateResolver.js'
 import { getSupabaseAdmin } from './supabaseAdmin.js'
 import { sendRecoveryTemplateToN8N } from './recoveryN8N.js'
 import type {
@@ -9,9 +14,15 @@ import type {
   RecoveryDispatchResult,
   RecoveryDispatchSummary,
   RecoveryLeadContext,
+  RecoveryMessageTemplate,
   RecoveryMessageType,
   RecoveryN8NPayload,
   RecoverySkippedLead,
+  RecoveryTemplateBinding,
+  RecoveryTemplateLookupResult,
+  RecoveryTemplateResolutionMode,
+  RecoveryTemplateRoute,
+  RecoveryTemplateVariableDefinition,
 } from './recoveryTypes.js'
 
 const DEFAULT_FUNNEL_ID = process.env.RECOVERY_FUNNEL_ID || 'quiz_frequencia_01'
@@ -22,10 +33,50 @@ const DEFAULT_LIMIT = 20
 
 type JsonRecord = Record<string, unknown>
 
+type RecoveryTemplateRouteRow = {
+  route_id: string
+  message_type: RecoveryMessageType
+  country: string
+  template_id: string
+  is_active: boolean
+  metadata: Record<string, unknown> | null
+}
+
+type RecoveryTemplateBindingRow = {
+  token: string
+  source_key: string
+  source_label: string
+  resolution_mode: string
+  value_map: Record<string, string> | null
+  fallback_value: string | null
+  required: boolean
+}
+
+type MessageTemplateRow = {
+  template_id: string
+  name: string | null
+  template_category: 'inicializacao' | 'conversa' | null
+  meta_template_id: string | null
+  meta_language: string | null
+  meta_payload: Record<string, unknown> | null
+  variable_definitions: unknown
+}
+
+const RECOVERY_TEMPLATE_RESOLUTION_MODES: RecoveryTemplateResolutionMode[] = [
+  'pass_through',
+  'mapped_value',
+]
+
 export function normalizeLimit(rawLimit: unknown, maxLimit: number = MAX_LIMIT): number {
   const parsed = Number(rawLimit)
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LIMIT
   return Math.min(Math.trunc(parsed), maxLimit)
+}
+
+export function normalizeMaxEligibleAgeMs(rawValue: unknown): number | null {
+  const parsed = Number(rawValue)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.trunc(parsed)
 }
 
 function normalizeText(value: unknown): string {
@@ -51,6 +102,77 @@ function isValidPhone(phone: string): boolean {
 function toJsonRecord(value: unknown): JsonRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as JsonRecord
+}
+
+function buildLeadContextKey(funnelId: string, leadId: string): string {
+  return `${funnelId}:${leadId}`
+}
+
+function isRecoveryTemplateResolutionMode(value: string): value is RecoveryTemplateResolutionMode {
+  return RECOVERY_TEMPLATE_RESOLUTION_MODES.includes(value as RecoveryTemplateResolutionMode)
+}
+
+function normalizeTemplateVariableDefinition(value: unknown): RecoveryTemplateVariableDefinition | null {
+  if (!value || typeof value !== 'object') return null
+
+  const token = normalizeText((value as { token?: unknown }).token)
+  const index = Number((value as { index?: unknown }).index)
+
+  if (!token || !Number.isInteger(index) || index <= 0) return null
+
+  return {
+    token,
+    index,
+    label: normalizeText((value as { label?: unknown }).label) || `Variavel ${index}`,
+    example: normalizeText((value as { example?: unknown }).example) || undefined,
+    required: typeof (value as { required?: unknown }).required === 'boolean'
+      ? (value as { required: boolean }).required
+      : true,
+  }
+}
+
+function normalizeTemplateVariableDefinitions(value: unknown): RecoveryTemplateVariableDefinition[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((entry) => normalizeTemplateVariableDefinition(entry))
+    .filter((entry): entry is RecoveryTemplateVariableDefinition => Boolean(entry))
+    .sort((left, right) => left.index - right.index)
+}
+
+function normalizeTemplateBinding(row: RecoveryTemplateBindingRow): RecoveryTemplateBinding | null {
+  if (!isRecoveryTemplateSourceKey(row.source_key)) return null
+  if (!isRecoveryTemplateResolutionMode(row.resolution_mode)) return null
+
+  return {
+    token: normalizeText(row.token),
+    source_key: row.source_key,
+    source_label: normalizeText(row.source_label) || getRecoveryTemplateSourceLabel(row.source_key),
+    resolution_mode: row.resolution_mode,
+    value_map: toJsonRecord(row.value_map)
+      ? Object.entries(row.value_map ?? {}).reduce<Record<string, string>>((acc, [key, value]) => {
+        const normalizedKey = key.trim()
+        const normalizedValue = normalizeText(value)
+        if (!normalizedKey || !normalizedValue) return acc
+        acc[normalizedKey] = normalizedValue
+        return acc
+      }, {})
+      : {},
+    fallback_value: normalizeText(row.fallback_value) || null,
+    required: row.required !== false,
+  }
+}
+
+function normalizeMessageTemplate(row: MessageTemplateRow): RecoveryMessageTemplate {
+  return {
+    template_id: row.template_id,
+    name: normalizeText(row.name) || row.template_id,
+    template_category: row.template_category ?? null,
+    meta_template_id: normalizeText(row.meta_template_id) || null,
+    meta_language: normalizeText(row.meta_language) || null,
+    meta_payload: toJsonRecord(row.meta_payload),
+    variable_definitions: normalizeTemplateVariableDefinitions(row.variable_definitions),
+  }
 }
 
 function readJsonText(record: JsonRecord | null | undefined, ...keys: string[]): string {
@@ -309,13 +431,29 @@ export function buildRecoveryCandidate(
 export function buildRecoveryCandidates(
   contexts: RecoveryLeadContext[],
   now: Date = new Date(),
+  options: { maxEligibleAgeMs?: number | null } = {},
 ): { candidates: RecoveryCandidate[]; skipped: RecoverySkippedLead[] } {
   const candidates: RecoveryCandidate[] = []
   const skipped: RecoverySkippedLead[] = []
+  const maxEligibleAgeMs = normalizeMaxEligibleAgeMs(options.maxEligibleAgeMs)
+  const nowTs = now.getTime()
 
   for (const context of contexts) {
     const evaluation = buildRecoveryCandidate(context, now)
     if (evaluation.candidate) {
+      if (maxEligibleAgeMs !== null) {
+        const eligibleAtTs = new Date(evaluation.candidate.eligible_at).getTime()
+        const eligibleAgeMs = nowTs - eligibleAtTs
+        if (Number.isFinite(eligibleAtTs) && eligibleAgeMs > maxEligibleAgeMs) {
+          skipped.push({
+            lead_id: evaluation.candidate.lead_id,
+            funnel_id: evaluation.candidate.funnel_id,
+            reason: 'eligible_window_expired',
+          })
+          continue
+        }
+      }
+
       candidates.push(evaluation.candidate)
     } else if (evaluation.skipped) {
       skipped.push(evaluation.skipped)
@@ -347,7 +485,7 @@ async function fetchLeadContexts(
 
   let compactQuery = supabase
     .from('vw_funnel_lead_compact')
-    .select('funnel_id,lead_id,session_id,name,email,phone,age,gender,country,has_purchase,last_event_at,perfil_image,auto_tag')
+    .select('funnel_id,lead_id,session_id,name,email,phone,age,gender,country,desire,has_purchase,last_event_at,perfil_image,auto_tag')
     .eq('funnel_id', params.funnelId)
     .order('last_event_at', { ascending: true })
 
@@ -406,6 +544,66 @@ async function fetchLeadContexts(
     funnelLead: funnelLeadByLeadId.get(compact.lead_id) || null,
     events: eventsByLeadId.get(compact.lead_id) || [],
   }))
+}
+
+export async function fetchRecoveryTemplateLookup(
+  supabase: SupabaseClient,
+  candidate: RecoveryCandidate,
+): Promise<RecoveryTemplateLookupResult | null> {
+  const { data: routeRow, error: routeError } = await supabase
+    .from('recovery_template_routes')
+    .select('route_id, message_type, country, template_id, is_active, metadata')
+    .eq('message_type', candidate.message_type)
+    .eq('country', candidate.country)
+    .eq('is_active', true)
+    .maybeSingle()
+
+  if (routeError) {
+    throw new Error(`Falha ao consultar recovery_template_routes: ${routeError.message}`)
+  }
+
+  if (!routeRow) return null
+
+  const route: RecoveryTemplateRoute = {
+    route_id: (routeRow as RecoveryTemplateRouteRow).route_id,
+    message_type: (routeRow as RecoveryTemplateRouteRow).message_type,
+    country: normalizeCountry((routeRow as RecoveryTemplateRouteRow).country),
+    template_id: (routeRow as RecoveryTemplateRouteRow).template_id,
+    is_active: Boolean((routeRow as RecoveryTemplateRouteRow).is_active),
+    metadata: toJsonRecord((routeRow as RecoveryTemplateRouteRow).metadata),
+  }
+
+  const [{ data: templateRow, error: templateError }, { data: bindingRows, error: bindingError }] = await Promise.all([
+    supabase
+      .from('message_templates')
+      .select('template_id, name, template_category, meta_template_id, meta_language, meta_payload, variable_definitions')
+      .eq('template_id', route.template_id)
+      .eq('channel', 'whatsapp')
+      .maybeSingle(),
+    supabase
+      .from('recovery_template_bindings')
+      .select('token, source_key, source_label, resolution_mode, value_map, fallback_value, required')
+      .eq('route_id', route.route_id)
+      .order('created_at', { ascending: true }),
+  ])
+
+  if (templateError) {
+    throw new Error(`Falha ao consultar message_templates: ${templateError.message}`)
+  }
+
+  if (bindingError) {
+    throw new Error(`Falha ao consultar recovery_template_bindings: ${bindingError.message}`)
+  }
+
+  if (!templateRow) return null
+
+  return {
+    route,
+    template: normalizeMessageTemplate(templateRow as MessageTemplateRow),
+    bindings: ((bindingRows ?? []) as RecoveryTemplateBindingRow[])
+      .map((row) => normalizeTemplateBinding(row))
+      .filter((row): row is RecoveryTemplateBinding => Boolean(row)),
+  }
 }
 
 async function hasPurchaseEvent(
@@ -471,33 +669,25 @@ async function updateDispatchStatus(
   }
 }
 
-function buildN8NPayload(candidate: RecoveryCandidate): RecoveryN8NPayload {
-  return {
-    lead_id: candidate.lead_id,
-    message_type: candidate.message_type,
-    country: candidate.country,
-    language: candidate.language,
-    phone: candidate.phone,
-    email: candidate.email,
-    name: candidate.name,
-    funnel_id: candidate.funnel_id,
-    trigger: candidate.trigger,
-  }
-}
-
 export async function dispatchDueRecoveries(params: {
   dryRun?: boolean
   limit?: number
   leadId?: string
   funnelId?: string
+  maxEligibleAgeMs?: number
   supabase?: SupabaseClient
   now?: Date
+  sendToN8N?: (payload: RecoveryN8NPayload) => ReturnType<typeof sendRecoveryTemplateToN8N>
 }): Promise<RecoveryDispatchSummary> {
   const dryRun = Boolean(params.dryRun)
   const limit = normalizeLimit(params.limit)
   const funnelId = normalizeText(params.funnelId) || DEFAULT_FUNNEL_ID
+  const maxEligibleAgeMs = normalizeMaxEligibleAgeMs(
+    params.maxEligibleAgeMs ?? process.env.RECOVERY_DISPATCH_MAX_ELIGIBLE_AGE_MS,
+  )
   const supabase = params.supabase || getSupabaseAdmin()
   const now = params.now || new Date()
+  const sendToN8N = params.sendToN8N || sendRecoveryTemplateToN8N
 
   const contexts = await fetchLeadContexts(supabase, {
     leadId: normalizeText(params.leadId) || undefined,
@@ -505,8 +695,13 @@ export async function dispatchDueRecoveries(params: {
     funnelId,
   })
 
-  const { candidates, skipped } = buildRecoveryCandidates(contexts, now)
+  const { candidates, skipped } = buildRecoveryCandidates(contexts, now, {
+    maxEligibleAgeMs,
+  })
   const selectedCandidates = candidates.slice(0, limit)
+  const contextByLeadKey = new Map(
+    contexts.map((context) => [buildLeadContextKey(context.compact.funnel_id, context.compact.lead_id), context]),
+  )
 
   if (dryRun) {
     return {
@@ -586,8 +781,86 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
-    const n8nPayload = buildN8NPayload(candidate)
-    const n8nResponse = await sendRecoveryTemplateToN8N(n8nPayload)
+    const context = contextByLeadKey.get(buildLeadContextKey(candidate.funnel_id, candidate.lead_id))
+    if (!context) {
+      await updateDispatchStatus(supabase, dispatchId, {
+        n8n_status: 'failed',
+        n8n_response: {
+          reason: 'lead_context_not_found',
+        },
+      })
+
+      results.push({
+        lead_id: candidate.lead_id,
+        funnel_id: candidate.funnel_id,
+        message_type: candidate.message_type,
+        status: 'failed',
+        reason: 'lead_context_not_found',
+        eligible_at: candidate.eligible_at,
+        dispatch_id: dispatchId,
+        n8n_status: 'failed',
+      })
+      continue
+    }
+
+    const templateLookup = await fetchRecoveryTemplateLookup(supabase, candidate)
+    if (!templateLookup) {
+      await updateDispatchStatus(supabase, dispatchId, {
+        n8n_status: 'failed',
+        n8n_response: {
+          reason: 'missing_template_route',
+          message_type: candidate.message_type,
+          country: candidate.country,
+        },
+      })
+
+      results.push({
+        lead_id: candidate.lead_id,
+        funnel_id: candidate.funnel_id,
+        message_type: candidate.message_type,
+        status: 'missing_template_route',
+        reason: 'missing_template_route',
+        eligible_at: candidate.eligible_at,
+        dispatch_id: dispatchId,
+        n8n_status: 'failed',
+      })
+      continue
+    }
+
+    const payloadResult = buildRecoveryTemplatePayload({
+      candidate,
+      compactLead: context.compact,
+      lookup: templateLookup,
+    })
+
+    if ('issues' in payloadResult) {
+      const issues = payloadResult.issues
+
+      await updateDispatchStatus(supabase, dispatchId, {
+        n8n_status: 'failed',
+        n8n_response: {
+          reason: 'missing_required_template_variable',
+          route_id: templateLookup.route.route_id,
+          template_id: templateLookup.template.template_id,
+          issues,
+        },
+      })
+
+      results.push({
+        lead_id: candidate.lead_id,
+        funnel_id: candidate.funnel_id,
+        message_type: candidate.message_type,
+        status: 'missing_required_template_variable',
+        reason: issues[0]?.message || 'missing_required_template_variable',
+        eligible_at: candidate.eligible_at,
+        dispatch_id: dispatchId,
+        n8n_status: 'failed',
+        response: issues,
+      })
+      continue
+    }
+
+    const n8nResponse = await sendToN8N(payloadResult.payload)
 
     if (n8nResponse.ok) {
       await updateDispatchStatus(supabase, dispatchId, {
@@ -596,6 +869,8 @@ export async function dispatchDueRecoveries(params: {
         n8n_response: {
           status: n8nResponse.status,
           data: n8nResponse.data,
+          template_id: payloadResult.payload.metadata.template_id,
+          template_variable_values: payloadResult.values,
         },
       })
 
