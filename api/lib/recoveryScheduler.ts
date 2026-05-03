@@ -32,14 +32,21 @@ export interface RecoverySchedulerDeps {
 const DEFAULT_INTERVAL_MS = 60000
 const MIN_INTERVAL_MS = 5000
 
+// Retorna configurações do scheduler
 export function getRecoverySchedulerConfig(env: NodeJS.ProcessEnv = process.env): RecoverySchedulerConfig {
+  // captura env que define se o scheduler está habilitado. Ele estará habilitado se ENV for "true".
   const enabled = String(env.RECOVERY_DISPATCH_ENABLED || '').trim().toLowerCase() === 'true'
+  // captura env que define o intervalo de execução do scheduler. O valor padrão é 60000 (1 minuto) e o mínimo é 5000 (5 segundos).
   const rawIntervalMs = Number(env.RECOVERY_DISPATCH_INTERVAL_MS)
+  // verifica se o intervalo é menor que o tipo definido, se não for retorna o valor definido no env.
   const intervalMs = Number.isFinite(rawIntervalMs) && rawIntervalMs >= MIN_INTERVAL_MS
     ? Math.trunc(rawIntervalMs)
     : DEFAULT_INTERVAL_MS
 
+  // Retorna um limite de dispatch, garantindo que esteja dentro do limite configurado.
   const limit = normalizeLimit(env.RECOVERY_DISPATCH_LIMIT)
+
+  // Captura o ID do funil, definido no env. Se não estiver definido, retorna undefined.
   const funnelId = typeof env.RECOVERY_FUNNEL_ID === 'string' && env.RECOVERY_FUNNEL_ID.trim()
     ? env.RECOVERY_FUNNEL_ID.trim()
     : undefined

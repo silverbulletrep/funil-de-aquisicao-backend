@@ -1,3 +1,6 @@
+// **Responsabilidade:** Regra de elegibilidade, prioridade e dispatch
+// **Pergunta:** Como ele define elegibilidade? Prioridade? Dispatch?
+
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   getRecoveryTemplateSourceLabel,
@@ -25,6 +28,8 @@ import type {
   RecoveryTemplateVariableDefinition,
 } from './recoveryTypes.js'
 
+// define FUNNEL ID que irá usar para capturar elegibilidade no recovery. Define quantidade de minutos para os disparos.
+// 
 const DEFAULT_FUNNEL_ID = process.env.RECOVERY_FUNNEL_ID || 'quiz_frequencia_01'
 const TEN_MINUTES_MS = 10 * 60 * 1000
 const TWENTY_FIVE_MINUTES_MS = 25 * 60 * 1000
@@ -67,29 +72,37 @@ const RECOVERY_TEMPLATE_RESOLUTION_MODES: RecoveryTemplateResolutionMode[] = [
   'mapped_value',
 ]
 
+// retorna limite
 export function normalizeLimit(rawLimit: unknown, maxLimit: number = MAX_LIMIT): number {
   const parsed = Number(rawLimit)
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LIMIT
   return Math.min(Math.trunc(parsed), maxLimit)
 }
 
+// retorna número, se for menor que zero ou não for finito, retorna null.
 export function normalizeMaxEligibleAgeMs(rawValue: unknown): number | null {
   const parsed = Number(rawValue)
   if (!Number.isFinite(parsed) || parsed <= 0) return null
   return Math.trunc(parsed)
 }
 
+// normaliza texto
 function normalizeText(value: unknown): string {
+  // SE valor for tipo string, retorna o valor, sem espaços na frente e atrás.
   return typeof value === 'string' ? value.trim() : ''
 }
 
+// Retorna string em maiúsculo, se o valor for vazio, retorna vazio. Se o valor for "UN", retorna "unknown".
 function normalizeCountry(value: unknown): string {
+  // define valor em maiúsculo
   const normalized = normalizeText(value).toUpperCase()
+  // se valor for null, ou false, retorna ''
   if (!normalized) return ''
   if (normalized === 'UN') return 'unknown'
   return normalized
 }
 
+// Remove tudo que não é número
 function normalizePhone(value: unknown): string {
   const digits = String(value || '').replace(/\D/g, '')
   return digits
@@ -255,6 +268,7 @@ function getLatestLeadIdentified(events: FunnelEventRow[]): FunnelEventRow | und
   return filtered[filtered.length - 1]
 }
 
+// verifica se o evento lead_identified foi disparado no step_id /resultado 
 function getFirstLeadIdentified(events: FunnelEventRow[]): FunnelEventRow | undefined {
   return events.find(
     (event) => event.event_type === 'lead_identified' && normalizeText(event.step_id) === '/resultado',
@@ -297,6 +311,7 @@ function resolveContact(context: RecoveryLeadContext): {
   return { phone, email, name }
 }
 
+// Retorna candidato de recuperação, com número, , tipo de mensagem, trigger, email, nome e país mapeados.
 function buildCandidateFromTrigger(
   context: RecoveryLeadContext,
   messageType: RecoveryMessageType,
@@ -330,6 +345,7 @@ function buildCandidateFromTrigger(
   }
 }
 
+// Função que categoriza e retorna o candidato de recuperação. ALTERAR AQUI SE precisar adicionar novas regras.
 export function buildRecoveryCandidate(
   context: RecoveryLeadContext,
   now: Date = new Date(),
@@ -337,11 +353,13 @@ export function buildRecoveryCandidate(
   const leadId = context.compact.lead_id
   const funnelId = context.compact.funnel_id
   const events = [...context.events].sort((a, b) => parseEventTime(a) - parseEventTime(b))
+  // captura bollean que verifica se existe purchase, seja no evento ou na compact.
   const hasPurchase = Boolean(context.compact.has_purchase) || events.some((event) => {
     if (event.event_type === 'purchase') return true
     return Boolean(event.purchase && Object.keys(event.purchase).length > 0)
   })
 
+  // Se o lead tiver purchase, retorna skipped
   if (hasPurchase) {
     return {
       skipped: {
@@ -352,6 +370,7 @@ export function buildRecoveryCandidate(
     }
   }
 
+  // Verifica se existe evento de IC em CASHPAYMENT em até 10 minutos.
   const nowTs = now.getTime()
   const cashPaymentEvent = events.find((event) => {
     return (
@@ -361,22 +380,33 @@ export function buildRecoveryCandidate(
     )
   })
 
+  // Verifica se existe evento de checkout em até 10 minutos.
   const checkoutEvent = events.find((event) => {
     return event.event_type === 'checkout_start' && parseEventTime(event) <= nowTs - TEN_MINUTES_MS
   })
 
+  // Verifica se existe qualquer evento de checkout
   const hasAnyCheckout = events.some((event) => event.event_type === 'checkout_start')
+
+  // verifica se o evento lead_identified foi disparado na página /resultado.
   const baseLeadIdentified = getFirstLeadIdentified(events)
+
+  // Pega o primeiro evento
   const fallbackBaseEvent = events[0]
+
+  // Se não tiver lead_identified no /resultado, pega o primeiro evento
   const noCheckoutBase = baseLeadIdentified || fallbackBaseEvent
+
   const noCheckoutDue = Boolean(
     !hasAnyCheckout &&
     noCheckoutBase &&
+
     parseEventTime(noCheckoutBase) <= nowTs - TWENTY_FIVE_MINUTES_MS,
   )
 
   let candidate: RecoveryCandidate | undefined
 
+  // define o tipo de mensagem com base em prioridade. Primeiro, boleto. Segundo, checkout. Terceiro, lead frio.
   if (cashPaymentEvent) {
     candidate = buildCandidateFromTrigger(
       context,
@@ -428,13 +458,18 @@ export function buildRecoveryCandidate(
   return { candidate }
 }
 
+// Retorna os candidados 
 export function buildRecoveryCandidates(
   contexts: RecoveryLeadContext[],
   now: Date = new Date(),
   options: { maxEligibleAgeMs?: number | null } = {},
 ): { candidates: RecoveryCandidate[]; skipped: RecoverySkippedLead[] } {
+  // captura os candidatos
   const candidates: RecoveryCandidate[] = []
+  // captura os candidatos pulados
   const skipped: RecoverySkippedLead[] = []
+  
+  // captura o tempo máximo de elegibilidade. 
   const maxEligibleAgeMs = normalizeMaxEligibleAgeMs(options.maxEligibleAgeMs)
   const nowTs = now.getTime()
 
@@ -442,8 +477,10 @@ export function buildRecoveryCandidates(
     const evaluation = buildRecoveryCandidate(context, now)
     if (evaluation.candidate) {
       if (maxEligibleAgeMs !== null) {
+        // retorna o tempo do evento + janela de tempo por tipo de disparo, ( 10 min, etc ). 
         const eligibleAtTs = new Date(evaluation.candidate.eligible_at).getTime()
-        const eligibleAgeMs = nowTs - eligibleAtTs
+        const eligibleAgeMs = nowTs - eligibleAtTs 
+        // verifica se o candidato ficou elegível a MAIS tempo do que o tempo máximo de elegibilidade.
         if (Number.isFinite(eligibleAtTs) && eligibleAgeMs > maxEligibleAgeMs) {
           skipped.push({
             lead_id: evaluation.candidate.lead_id,
@@ -453,7 +490,7 @@ export function buildRecoveryCandidates(
           continue
         }
       }
-
+      // SE NAO foi pulado até aqui, adicionar na lista de candidatos.
       candidates.push(evaluation.candidate)
     } else if (evaluation.skipped) {
       skipped.push(evaluation.skipped)
@@ -546,6 +583,7 @@ async function fetchLeadContexts(
   }))
 }
 
+// Busca os dados do template de recuperação. Como país  template id, etc.
 export async function fetchRecoveryTemplateLookup(
   supabase: SupabaseClient,
   candidate: RecoveryCandidate,
@@ -573,6 +611,7 @@ export async function fetchRecoveryTemplateLookup(
     metadata: toJsonRecord((routeRow as RecoveryTemplateRouteRow).metadata),
   }
 
+  // Busca o template e os valores mapeados.
   const [{ data: templateRow, error: templateError }, { data: bindingRows, error: bindingError }] = await Promise.all([
     supabase
       .from('message_templates')
@@ -669,7 +708,12 @@ async function updateDispatchStatus(
   }
 }
 
+// Função que cria o payload enviado para o N8N, e executa o disparo.
 export async function dispatchDueRecoveries(params: {
+
+// Parâmetros de controle do disparo -- dry_run --> verifica se é teste, limit --> quantidade de leads processados
+// leadId, FunnelId, id do lead, Funil, maxElegible --> tempo máximo para elegibilidade de disparo do lead. Supabase? --> Supabase do ambiente.
+// now --> Momento atual, para simulações. sendToN8N --> Função que envia o payload para o N8N.
   dryRun?: boolean
   limit?: number
   leadId?: string
@@ -677,6 +721,7 @@ export async function dispatchDueRecoveries(params: {
   maxEligibleAgeMs?: number
   supabase?: SupabaseClient
   now?: Date
+  // Função que envia o paylaod para o N8N
   sendToN8N?: (payload: RecoveryN8NPayload) => ReturnType<typeof sendRecoveryTemplateToN8N>
 }): Promise<RecoveryDispatchSummary> {
   const dryRun = Boolean(params.dryRun)
@@ -689,6 +734,7 @@ export async function dispatchDueRecoveries(params: {
   const now = params.now || new Date()
   const sendToN8N = params.sendToN8N || sendRecoveryTemplateToN8N
 
+  // Busca pelo id e eventos do lead.
   const contexts = await fetchLeadContexts(supabase, {
     leadId: normalizeText(params.leadId) || undefined,
     limit,
@@ -698,7 +744,11 @@ export async function dispatchDueRecoveries(params: {
   const { candidates, skipped } = buildRecoveryCandidates(contexts, now, {
     maxEligibleAgeMs,
   })
+
+  // Pega os candidatos dentro do limite selecionado de disparo
   const selectedCandidates = candidates.slice(0, limit)
+
+  // Cria mapa de contexto por LEAD ID + Funnel ID.
   const contextByLeadKey = new Map(
     contexts.map((context) => [buildLeadContextKey(context.compact.funnel_id, context.compact.lead_id), context]),
   )
@@ -716,6 +766,8 @@ export async function dispatchDueRecoveries(params: {
   const results: RecoveryDispatchResult[] = []
 
   for (const candidate of selectedCandidates) {
+
+    // Se o idioma do lead não for identificado, não envia o disparo.
     if (candidate.language === 'unknown') {
       results.push({
         lead_id: candidate.lead_id,
@@ -729,8 +781,10 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Cria o registro em whatsapp_recovery_dispatches, se não existir.
     const { dispatchId, alreadyDispatched } = await createPendingDispatch(supabase, candidate)
 
+    // Se o registro já existir, não envia o disparo.
     if (alreadyDispatched) {
       results.push({
         lead_id: candidate.lead_id,
@@ -745,6 +799,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Se o dispatchId não for encontrado, não envia o disparo.
     if (!dispatchId) {
       results.push({
         lead_id: candidate.lead_id,
@@ -759,6 +814,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Se o lead tiver uma compra, não envia o disparo.
     const purchaseFound = await hasPurchaseEvent(supabase, candidate.funnel_id, candidate.lead_id)
     if (purchaseFound) {
       await updateDispatchStatus(supabase, dispatchId, {
@@ -781,6 +837,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Pega o contexto do lead. Com base na leadKey mapeada anteriormente
     const context = contextByLeadKey.get(buildLeadContextKey(candidate.funnel_id, candidate.lead_id))
     if (!context) {
       await updateDispatchStatus(supabase, dispatchId, {
@@ -803,6 +860,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Busca pelo template de recuperação, com base no tipo de mensagem e país.
     const templateLookup = await fetchRecoveryTemplateLookup(supabase, candidate)
     if (!templateLookup) {
       await updateDispatchStatus(supabase, dispatchId, {
@@ -827,6 +885,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Constrói o payload do template.
     const payloadResult = buildRecoveryTemplatePayload({
       candidate,
       compactLead: context.compact,
@@ -860,6 +919,7 @@ export async function dispatchDueRecoveries(params: {
       continue
     }
 
+    // Envia o payload para o N8N.
     const n8nResponse = await sendToN8N(payloadResult.payload)
 
     if (n8nResponse.ok) {
