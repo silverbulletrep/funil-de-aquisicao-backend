@@ -61,6 +61,16 @@ function createSupabaseMock(seed?: {
     predicates: Array<(row: TableRow) => boolean>,
   ) => predicates.reduce((acc, predicate) => acc.filter(predicate), rows)
 
+  const compareValues = (left: unknown, right: unknown): number => {
+    if (typeof left === 'number' && typeof right === 'number') return left - right
+
+    const leftDate = Date.parse(String(left ?? ''))
+    const rightDate = Date.parse(String(right ?? ''))
+    if (Number.isFinite(leftDate) && Number.isFinite(rightDate)) return leftDate - rightDate
+
+    return String(left ?? '').localeCompare(String(right ?? ''))
+  }
+
   const supabase = {
     updates,
     tables,
@@ -91,6 +101,14 @@ function createSupabaseMock(seed?: {
         },
         in(column: string, values: unknown[]) {
           state.predicates.push((row) => values.includes(row[column]))
+          return builder
+        },
+        gte(column: string, value: unknown) {
+          state.predicates.push((row) => compareValues(row[column], value) >= 0)
+          return builder
+        },
+        lt(column: string, value: unknown) {
+          state.predicates.push((row) => compareValues(row[column], value) < 0)
           return builder
         },
         order(column: string, options?: { ascending?: boolean }) {
@@ -165,9 +183,7 @@ function createSupabaseMock(seed?: {
         let rows = applyFilters(tables[table], state.predicates)
         if (state.orderBy) {
           rows = [...rows].sort((left, right) => {
-            const leftValue = left[state.orderBy?.column]
-            const rightValue = right[state.orderBy?.column]
-            const compare = String(leftValue ?? '').localeCompare(String(rightValue ?? ''))
+            const compare = compareValues(left[state.orderBy?.column], right[state.orderBy?.column])
             return state.orderBy?.ascending ? compare : -compare
           })
         }
@@ -413,6 +429,244 @@ test('buildRecoveryCandidates skips leads with expired eligible window', () => {
   assert.equal(summary.skipped.length, 1)
   assert.equal(summary.skipped[0]?.lead_id, 'lead_stale')
   assert.equal(summary.skipped[0]?.reason, 'eligible_window_expired')
+})
+
+test('dispatchDueRecoveries prioritizes recent leads before old backlog', async () => {
+  const supabase = createSupabaseMock({
+    compactRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        name: 'Lead Old',
+        email: 'old@test.com',
+        phone: '351911111111',
+        country: 'PT',
+        has_purchase: false,
+        last_event_at: '2026-03-10T19:40:00.000Z',
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        name: 'Lead Recent',
+        email: 'recent@test.com',
+        phone: '351922222222',
+        country: 'PT',
+        has_purchase: false,
+        last_event_at: '2026-05-03T16:10:14.610Z',
+      },
+    ],
+    funnelLeadRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        attributes: {},
+        metadata: {},
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        attributes: {},
+        metadata: {},
+      },
+    ],
+    eventRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        event_id: 'evt-old',
+        event_type: 'checkout_start',
+        event_timestamp: '2026-03-10T19:30:00.000Z',
+        step_id: '/fim',
+        page_path: '/pt/fim',
+        attributes: null,
+        purchase: null,
+        metadata: null,
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        event_id: 'evt-recent',
+        event_type: 'PURCHASE_BILLET_PRINTED',
+        event_timestamp: '2026-05-03T16:10:14.610Z',
+        step_id: 'checkout_front',
+        page_path: '/pt/fim',
+        attributes: { payment_type: 'CASHPAYMENT' },
+        purchase: null,
+        metadata: null,
+      },
+    ],
+  })
+
+  const previousLookback = process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+  const previousBackfill = process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED
+  process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = '3600000'
+  process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED = 'false'
+
+  const summary = await dispatchDueRecoveries({
+    dryRun: true,
+    limit: 1,
+    funnelId: 'quiz_frequencia_01',
+    supabase: supabase as unknown as SupabaseClient,
+    now: new Date('2026-05-03T16:30:00.000Z'),
+  })
+
+  assert.equal(summary.candidate_count, 1)
+  assert.equal(summary.candidates[0]?.lead_id, 'lead_recent')
+  assert.equal(summary.candidates[0]?.message_type, 'multibanco_reminder')
+
+  if (typeof previousLookback === 'string') process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = previousLookback
+  else delete process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+  if (typeof previousBackfill === 'string') process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED = previousBackfill
+  else delete process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED
+})
+
+test('dispatchDueRecoveries keeps exact lead lookup unchanged', async () => {
+  const supabase = createSupabaseMock({
+    compactRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_specific',
+        name: 'Lead Specific',
+        email: 'specific@test.com',
+        phone: '351933333333',
+        country: 'PT',
+        has_purchase: false,
+        last_event_at: '2026-03-10T19:40:00.000Z',
+      },
+    ],
+    funnelLeadRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_specific',
+        attributes: {},
+        metadata: {},
+      },
+    ],
+    eventRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_specific',
+        event_id: 'evt-specific',
+        event_type: 'checkout_start',
+        event_timestamp: '2026-03-10T19:30:00.000Z',
+        step_id: '/fim',
+        page_path: '/pt/fim',
+        attributes: null,
+        purchase: null,
+        metadata: null,
+      },
+    ],
+  })
+
+  const previousLookback = process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+  process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = '60000'
+
+  const summary = await dispatchDueRecoveries({
+    dryRun: true,
+    limit: 1,
+    leadId: 'lead_specific',
+    funnelId: 'quiz_frequencia_01',
+    supabase: supabase as unknown as SupabaseClient,
+    now: new Date('2026-05-03T16:30:00.000Z'),
+  })
+
+  assert.equal(summary.candidate_count, 1)
+  assert.equal(summary.candidates[0]?.lead_id, 'lead_specific')
+  assert.equal(summary.candidates[0]?.message_type, 'checkout_no_purchase')
+
+  if (typeof previousLookback === 'string') process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = previousLookback
+  else delete process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+})
+
+test('dispatchDueRecoveries appends backfill only after recent-first fetch', async () => {
+  const supabase = createSupabaseMock({
+    compactRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        name: 'Lead Old',
+        email: 'old@test.com',
+        phone: '351911111111',
+        country: 'PT',
+        has_purchase: false,
+        last_event_at: '2026-03-10T19:40:00.000Z',
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        name: 'Lead Recent',
+        email: 'recent@test.com',
+        phone: '351922222222',
+        country: 'PT',
+        has_purchase: false,
+        last_event_at: '2026-05-03T16:10:14.610Z',
+      },
+    ],
+    funnelLeadRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        attributes: {},
+        metadata: {},
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        attributes: {},
+        metadata: {},
+      },
+    ],
+    eventRows: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_old',
+        event_id: 'evt-old',
+        event_type: 'checkout_start',
+        event_timestamp: '2026-03-10T19:30:00.000Z',
+        step_id: '/fim',
+        page_path: '/pt/fim',
+        attributes: null,
+        purchase: null,
+        metadata: null,
+      },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_recent',
+        event_id: 'evt-recent',
+        event_type: 'PURCHASE_BILLET_PRINTED',
+        event_timestamp: '2026-05-03T16:10:14.610Z',
+        step_id: 'checkout_front',
+        page_path: '/pt/fim',
+        attributes: { payment_type: 'CASHPAYMENT' },
+        purchase: null,
+        metadata: null,
+      },
+    ],
+  })
+
+  const previousLookback = process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+  const previousBackfill = process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED
+  process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = '60000'
+  process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED = 'true'
+
+  const summary = await dispatchDueRecoveries({
+    dryRun: true,
+    limit: 2,
+    funnelId: 'quiz_frequencia_01',
+    supabase: supabase as unknown as SupabaseClient,
+    now: new Date('2026-05-03T16:30:00.000Z'),
+  })
+
+  assert.equal(summary.candidate_count, 2)
+  assert.deepEqual(
+    summary.candidates.map((candidate) => candidate.lead_id).sort(),
+    ['lead_old', 'lead_recent'],
+  )
+
+  if (typeof previousLookback === 'string') process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS = previousLookback
+  else delete process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS
+  if (typeof previousBackfill === 'string') process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED = previousBackfill
+  else delete process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED
 })
 
 test('fetchRecoveryTemplateLookup loads active route, template and bindings by message_type + country', async () => {

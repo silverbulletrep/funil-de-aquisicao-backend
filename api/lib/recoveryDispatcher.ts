@@ -35,6 +35,7 @@ const TEN_MINUTES_MS = 10 * 60 * 1000
 const TWENTY_FIVE_MINUTES_MS = 25 * 60 * 1000
 const MAX_LIMIT = 100
 const DEFAULT_LIMIT = 20
+const RECOVERY_FETCH_SAFETY_MS = 2 * 60 * 1000
 
 type JsonRecord = Record<string, unknown>
 
@@ -84,6 +85,15 @@ export function normalizeMaxEligibleAgeMs(rawValue: unknown): number | null {
   const parsed = Number(rawValue)
   if (!Number.isFinite(parsed) || parsed <= 0) return null
   return Math.trunc(parsed)
+}
+
+function resolveRecentLeadLookbackMs(maxEligibleAgeMs: number | null): number {
+  const override = Number(process.env.RECOVERY_DISPATCH_RECENT_LOOKBACK_MS)
+  if (Number.isFinite(override) && override > 0) {
+    return Math.trunc(override)
+  }
+
+  return (maxEligibleAgeMs ?? 0) + TWENTY_FIVE_MINUTES_MS + RECOVERY_FETCH_SAFETY_MS
 }
 
 // normaliza texto
@@ -514,31 +524,106 @@ export function buildRecoveryCandidates(
   return { candidates, skipped }
 }
 
-async function fetchLeadContexts(
-  supabase: SupabaseClient,
-  params: { leadId?: string; limit: number; funnelId: string },
-): Promise<RecoveryLeadContext[]> {
-  const fetchLeadCount = params.leadId ? 1 : Math.min(Math.max(params.limit * 5, params.limit), 250)
+function buildRecentLeadLowerBoundIso(now: Date, maxEligibleAgeMs: number | null): string {
+  return new Date(now.getTime() - resolveRecentLeadLookbackMs(maxEligibleAgeMs)).toISOString()
+}
 
-  let compactQuery = supabase
+async function fetchCompactLeadById(
+  supabase: SupabaseClient,
+  funnelId: string,
+  leadId: string,
+): Promise<CompactLeadRow[]> {
+  const { data, error } = await supabase
+    .from('vw_funnel_lead_compact')
+    .select('funnel_id,lead_id,session_id,name,email,phone,age,gender,country,desire,has_purchase,last_event_at,perfil_image,auto_tag')
+    .eq('funnel_id', funnelId)
+    .eq('lead_id', leadId)
+
+  if (error) {
+    throw new Error(`Falha ao consultar vw_funnel_lead_compact por lead_id: ${error.message}`)
+  }
+
+  return (data || []).filter((row) => normalizeText(row.lead_id)) as CompactLeadRow[]
+}
+
+async function fetchCompactRowsRecentFirst(
+  supabase: SupabaseClient,
+  params: {
+    funnelId: string
+    fetchLeadCount: number
+    now: Date
+    maxEligibleAgeMs: number | null
+  },
+): Promise<CompactLeadRow[]> {
+  const recentLowerBoundIso = buildRecentLeadLowerBoundIso(params.now, params.maxEligibleAgeMs)
+  const backfillEnabled = String(process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED || '').trim().toLowerCase() === 'true'
+
+  const { data: recentRows, error: recentError } = await supabase
     .from('vw_funnel_lead_compact')
     .select('funnel_id,lead_id,session_id,name,email,phone,age,gender,country,desire,has_purchase,last_event_at,perfil_image,auto_tag')
     .eq('funnel_id', params.funnelId)
+    .eq('has_purchase', false)
+    .gte('last_event_at', recentLowerBoundIso)
+    .order('last_event_at', { ascending: false })
+    .limit(params.fetchLeadCount)
+
+  if (recentError) {
+    throw new Error(`Falha ao consultar lote recente de vw_funnel_lead_compact: ${recentError.message}`)
+  }
+
+  const deduped = new Map<string, CompactLeadRow>()
+  for (const row of (recentRows || []) as CompactLeadRow[]) {
+    if (!normalizeText(row.lead_id)) continue
+    deduped.set(row.lead_id, row)
+  }
+
+  if (!backfillEnabled || deduped.size >= params.fetchLeadCount) {
+    return [...deduped.values()]
+  }
+
+  const remaining = params.fetchLeadCount - deduped.size
+
+  const { data: backfillRows, error: backfillError } = await supabase
+    .from('vw_funnel_lead_compact')
+    .select('funnel_id,lead_id,session_id,name,email,phone,age,gender,country,desire,has_purchase,last_event_at,perfil_image,auto_tag')
+    .eq('funnel_id', params.funnelId)
+    .eq('has_purchase', false)
+    .lt('last_event_at', recentLowerBoundIso)
     .order('last_event_at', { ascending: true })
+    .limit(remaining)
 
-  if (params.leadId) {
-    compactQuery = compactQuery.eq('lead_id', params.leadId)
-  } else {
-    compactQuery = compactQuery.eq('has_purchase', false).limit(fetchLeadCount)
+  if (backfillError) {
+    throw new Error(`Falha ao consultar lote de backfill de vw_funnel_lead_compact: ${backfillError.message}`)
   }
 
-  const { data: compactRows, error: compactError } = await compactQuery
-
-  if (compactError) {
-    throw new Error(`Falha ao consultar vw_funnel_lead_compact: ${compactError.message}`)
+  for (const row of (backfillRows || []) as CompactLeadRow[]) {
+    if (!normalizeText(row.lead_id)) continue
+    deduped.set(row.lead_id, row)
   }
 
-  const compactLeads = (compactRows || []).filter((row) => normalizeText(row.lead_id)) as CompactLeadRow[]
+  return [...deduped.values()]
+}
+
+async function fetchLeadContexts(
+  supabase: SupabaseClient,
+  params: {
+    leadId?: string
+    limit: number
+    funnelId: string
+    now: Date
+    maxEligibleAgeMs: number | null
+  },
+): Promise<RecoveryLeadContext[]> {
+  const fetchLeadCount = params.leadId ? 1 : Math.min(Math.max(params.limit * 5, params.limit), 250)
+  const compactLeads = params.leadId
+    ? await fetchCompactLeadById(supabase, params.funnelId, params.leadId)
+    : await fetchCompactRowsRecentFirst(supabase, {
+      funnelId: params.funnelId,
+      fetchLeadCount,
+      now: params.now,
+      maxEligibleAgeMs: params.maxEligibleAgeMs,
+    })
+
   if (!compactLeads.length) return []
 
   const leadIds = [...new Set(compactLeads.map((row) => row.lead_id))]
@@ -739,6 +824,16 @@ export async function dispatchDueRecoveries(params: {
     leadId: normalizeText(params.leadId) || undefined,
     limit,
     funnelId,
+    now,
+    maxEligibleAgeMs,
+  })
+
+  console.log('[RECOVERY] Context fetch summary', {
+    funnel_id: funnelId,
+    fetch_mode: params.leadId ? 'exact_lead' : 'recent_first',
+    max_eligible_age_ms: maxEligibleAgeMs,
+    recent_lookback_ms: params.leadId ? null : resolveRecentLeadLookbackMs(maxEligibleAgeMs),
+    fetched_context_count: contexts.length,
   })
 
   const { candidates, skipped } = buildRecoveryCandidates(contexts, now, {

@@ -100,6 +100,7 @@ export function startRecoveryScheduler(
         candidate_count: summary.candidate_count,
         result_count: summary.results.length,
         skipped_count: summary.skipped.length,
+        skipped_expired_count: summary.skipped.filter((item) => item.reason === 'eligible_window_expired').length,
       })
     } catch (error: unknown) {
       const err = error as Error & { stack?: string }
