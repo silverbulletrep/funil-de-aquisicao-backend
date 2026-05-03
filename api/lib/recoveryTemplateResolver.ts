@@ -164,6 +164,7 @@ export function buildRecoveryTemplatePayload(args: {
     values,
     payload: {
       lead_id: candidate.lead_id,
+      message_id: crypto.randomUUID(),
       message_type: candidate.message_type,
       destination: candidate.phone,
       phone: candidate.phone,

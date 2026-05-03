@@ -122,6 +122,7 @@ export interface RecoverySkippedLead {
 
 export interface RecoveryN8NPayload {
   lead_id: string
+  message_id: string
   message_type: RecoveryMessageType
   destination: string
   country: string
