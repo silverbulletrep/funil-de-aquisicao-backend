@@ -395,6 +395,15 @@ export function buildRecoveryCandidate(
     return event.event_type === 'checkout_start' && parseEventTime(event) <= nowTs - TEN_MINUTES_MS
   })
 
+  // Verifica se existe qualquer evento de IC em CASHPAYMENT (independente de estar maduro ou não para disparo)
+  // Isso evita que um checkout_no_purchase seja disparado se o lead já gerou um boleto/multibanco
+  const hasAnyCashPayment = events.some((event) => {
+    return (
+      event.event_type === 'PURCHASE_BILLET_PRINTED' &&
+      getEventPaymentType(event) === 'CASHPAYMENT'
+    )
+  })
+
   // Verifica se existe qualquer evento de checkout
   const hasAnyCheckout = events.some((event) => event.event_type === 'checkout_start')
 
@@ -409,6 +418,7 @@ export function buildRecoveryCandidate(
 
   const noCheckoutDue = Boolean(
     !hasAnyCheckout &&
+    !hasAnyCashPayment &&
     noCheckoutBase &&
 
     parseEventTime(noCheckoutBase) <= nowTs - TWENTY_FIVE_MINUTES_MS,
@@ -425,7 +435,7 @@ export function buildRecoveryCandidate(
       TEN_MINUTES_MS,
       'cashpayment_due_after_10m',
     )
-  } else if (checkoutEvent) {
+  } else if (checkoutEvent && !hasAnyCashPayment) {
     candidate = buildCandidateFromTrigger(
       context,
       'checkout_no_purchase',
