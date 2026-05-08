@@ -442,7 +442,8 @@ export function buildRecoveryCandidate(
       context,
       'no_checkout',
       noCheckoutBase,
-      TWENTY_FIVE_MINUTES_MS,
+      // TWENTY_FIVE_MINUTES_MS,
+      TEN_MINUTES_MS,
       'no_checkout_due_after_25m_from_offer_revealed',
     )
   }
@@ -480,7 +481,7 @@ export function buildRecoveryCandidates(
   const candidates: RecoveryCandidate[] = []
   // captura os candidatos pulados
   const skipped: RecoverySkippedLead[] = []
-  
+
   // captura o tempo máximo de elegibilidade. 
   const maxEligibleAgeMs = normalizeMaxEligibleAgeMs(options.maxEligibleAgeMs)
   const nowTs = now.getTime()
@@ -491,7 +492,7 @@ export function buildRecoveryCandidates(
       if (maxEligibleAgeMs !== null) {
         // retorna o tempo do evento + janela de tempo por tipo de disparo, ( 10 min, etc ). 
         const eligibleAtTs = new Date(evaluation.candidate.eligible_at).getTime()
-        const eligibleAgeMs = nowTs - eligibleAtTs 
+        const eligibleAgeMs = nowTs - eligibleAtTs
         // verifica se o candidato ficou elegível a MAIS tempo do que o tempo máximo de elegibilidade.
         if (Number.isFinite(eligibleAtTs) && eligibleAgeMs > maxEligibleAgeMs) {
           skipped.push({
@@ -798,9 +799,9 @@ async function updateDispatchStatus(
 // Função que cria o payload enviado para o N8N, e executa o disparo.
 export async function dispatchDueRecoveries(params: {
 
-// Parâmetros de controle do disparo -- dry_run --> verifica se é teste, limit --> quantidade de leads processados
-// leadId, FunnelId, id do lead, Funil, maxElegible --> tempo máximo para elegibilidade de disparo do lead. Supabase? --> Supabase do ambiente.
-// now --> Momento atual, para simulações. sendToN8N --> Função que envia o payload para o N8N.
+  // Parâmetros de controle do disparo -- dry_run --> verifica se é teste, limit --> quantidade de leads processados
+  // leadId, FunnelId, id do lead, Funil, maxElegible --> tempo máximo para elegibilidade de disparo do lead. Supabase? --> Supabase do ambiente.
+  // now --> Momento atual, para simulações. sendToN8N --> Função que envia o payload para o N8N.
   dryRun?: boolean
   limit?: number
   leadId?: string
