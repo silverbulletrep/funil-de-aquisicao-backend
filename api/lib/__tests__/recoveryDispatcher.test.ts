@@ -250,7 +250,7 @@ test('multibanco_reminder has priority over checkout_no_purchase', () => {
   assert.equal(evaluation.candidate?.message_type, 'multibanco_reminder')
 })
 
-test('no_checkout uses /resultado lead_identified after 25 minutes', () => {
+test('no_checkout uses offer_revealed after 25 minutes', () => {
   const context = makeContext({
     compact: {
       funnel_id: 'quiz_frequencia_01',
@@ -277,13 +277,64 @@ test('no_checkout uses /resultado lead_identified after 25 minutes', () => {
           name: 'No Checkout',
         },
       },
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_no_checkout',
+        event_id: 'evt-offer',
+        event_type: 'offer_revealed',
+        event_timestamp: '2026-04-30T11:05:00.000Z',
+        step_id: '/fim-pos-pitch',
+        page_path: '/pt/fim',
+        attributes: {
+          source: 'gatingComplete',
+          gate: 'fim_below_fold',
+        },
+      },
     ],
   })
 
   const evaluation = buildRecoveryCandidate(context, new Date('2026-04-30T11:30:01.000Z'))
   assert.ok(evaluation.candidate)
   assert.equal(evaluation.candidate?.message_type, 'no_checkout')
-  assert.equal(evaluation.candidate?.language, 'unknown')
+  assert.equal(evaluation.candidate?.reason, 'no_checkout_due_after_25m_from_offer_revealed')
+  assert.equal(evaluation.candidate?.trigger.event_type, 'offer_revealed')
+  assert.equal(evaluation.candidate?.eligible_at, '2026-04-30T11:30:00.000Z')
+  assert.equal(evaluation.candidate?.language, 'pt')
+})
+
+test('no_checkout skips leads that have not reached post-pitch offer', () => {
+  const context = makeContext({
+    compact: {
+      funnel_id: 'quiz_frequencia_01',
+      lead_id: 'lead_pre_pitch',
+      country: 'PT',
+      phone: null,
+      email: null,
+      name: null,
+      has_purchase: false,
+      last_event_at: '2026-04-30T11:20:00.000Z',
+    },
+    events: [
+      {
+        funnel_id: 'quiz_frequencia_01',
+        lead_id: 'lead_pre_pitch',
+        event_id: 'evt-pre-pitch',
+        event_type: 'lead_identified',
+        event_timestamp: '2026-04-30T11:00:00.000Z',
+        step_id: '/resultado',
+        page_path: null,
+        attributes: {
+          phone: '351934567890',
+          email: 'pre-pitch@test.com',
+          name: 'Pre Pitch',
+        },
+      },
+    ],
+  })
+
+  const evaluation = buildRecoveryCandidate(context, new Date('2026-04-30T11:30:01.000Z'))
+  assert.equal(evaluation.candidate, undefined)
+  assert.equal(evaluation.skipped?.reason, 'not_due')
 })
 
 test('purchase blocks recovery candidate', () => {

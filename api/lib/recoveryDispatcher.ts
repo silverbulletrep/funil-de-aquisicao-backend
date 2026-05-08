@@ -36,6 +36,7 @@ const TWENTY_FIVE_MINUTES_MS = 25 * 60 * 1000
 const MAX_LIMIT = 100
 const DEFAULT_LIMIT = 20
 const RECOVERY_FETCH_SAFETY_MS = 2 * 60 * 1000
+const POST_PITCH_STEP_ID = '/fim-pos-pitch'
 
 type JsonRecord = Record<string, unknown>
 
@@ -278,10 +279,9 @@ function getLatestLeadIdentified(events: FunnelEventRow[]): FunnelEventRow | und
   return filtered[filtered.length - 1]
 }
 
-// verifica se o evento lead_identified foi disparado no step_id /resultado 
-function getFirstLeadIdentified(events: FunnelEventRow[]): FunnelEventRow | undefined {
+function getFirstOfferRevealed(events: FunnelEventRow[]): FunnelEventRow | undefined {
   return events.find(
-    (event) => event.event_type === 'lead_identified' && normalizeText(event.step_id) === '/resultado',
+    (event) => event.event_type === 'offer_revealed' && normalizeText(event.step_id) === POST_PITCH_STEP_ID,
   )
 }
 
@@ -407,14 +407,8 @@ export function buildRecoveryCandidate(
   // Verifica se existe qualquer evento de checkout
   const hasAnyCheckout = events.some((event) => event.event_type === 'checkout_start')
 
-  // verifica se o evento lead_identified foi disparado na página /resultado.
-  const baseLeadIdentified = getFirstLeadIdentified(events)
-
-  // Pega o primeiro evento
-  const fallbackBaseEvent = events[0]
-
-  // Se não tiver lead_identified no /resultado, pega o primeiro evento
-  const noCheckoutBase = baseLeadIdentified || fallbackBaseEvent
+  // Para no_checkout, só considera leads que passaram do pitch e viram a oferta.
+  const noCheckoutBase = getFirstOfferRevealed(events)
 
   const noCheckoutDue = Boolean(
     !hasAnyCheckout &&
@@ -449,9 +443,7 @@ export function buildRecoveryCandidate(
       'no_checkout',
       noCheckoutBase,
       TWENTY_FIVE_MINUTES_MS,
-      baseLeadIdentified
-        ? 'no_checkout_due_after_25m_from_result'
-        : 'no_checkout_due_after_25m_from_first_event',
+      'no_checkout_due_after_25m_from_offer_revealed',
     )
   }
 
