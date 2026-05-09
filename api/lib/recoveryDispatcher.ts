@@ -37,6 +37,13 @@ const MAX_LIMIT = 100
 const DEFAULT_LIMIT = 20
 const RECOVERY_FETCH_SAFETY_MS = 2 * 60 * 1000
 const POST_PITCH_STEP_ID = '/fim-pos-pitch'
+const RECOVERY_RELEVANT_EVENT_TYPES = [
+  'lead_identified',
+  'offer_revealed',
+  'checkout_start',
+  'PURCHASE_BILLET_PRINTED',
+  'purchase',
+] as const
 
 type JsonRecord = Record<string, unknown>
 
@@ -641,11 +648,20 @@ async function fetchLeadContexts(
     throw new Error(`Falha ao consultar funnel_leads: ${funnelLeadsError.message}`)
   }
 
-  const { data: events, error: eventsError } = await supabase
+  const backfillEnabled = String(process.env.RECOVERY_DISPATCH_BACKFILL_ENABLED || '').trim().toLowerCase() === 'true'
+  const recentLowerBoundIso = buildRecentLeadLowerBoundIso(params.now, params.maxEligibleAgeMs)
+  let eventsQuery = supabase
     .from('funnel_events')
     .select('event_id,funnel_id,lead_id,event_type,event_timestamp,received_at,step_id,page_path,attributes,purchase,metadata')
     .eq('funnel_id', params.funnelId)
     .in('lead_id', leadIds)
+    .in('event_type', [...RECOVERY_RELEVANT_EVENT_TYPES])
+
+  if (!params.leadId && !backfillEnabled) {
+    eventsQuery = eventsQuery.gte('event_timestamp', recentLowerBoundIso)
+  }
+
+  const { data: events, error: eventsError } = await eventsQuery
     .order('event_timestamp', { ascending: true })
 
   if (eventsError) {
