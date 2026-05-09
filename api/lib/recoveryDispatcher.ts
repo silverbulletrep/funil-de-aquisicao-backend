@@ -422,7 +422,7 @@ export function buildRecoveryCandidate(
     !hasAnyCashPayment &&
     noCheckoutBase &&
 
-    parseEventTime(noCheckoutBase) <= nowTs - TWENTY_FIVE_MINUTES_MS,
+    parseEventTime(noCheckoutBase) <= nowTs - TEN_MINUTES_MS,
   )
 
   let candidate: RecoveryCandidate | undefined
@@ -449,9 +449,8 @@ export function buildRecoveryCandidate(
       context,
       'no_checkout',
       noCheckoutBase,
-      // TWENTY_FIVE_MINUTES_MS,
       TEN_MINUTES_MS,
-      'no_checkout_due_after_25m_from_offer_revealed',
+      'no_checkout_due_after_10m_from_offer_revealed',
     )
   }
 

@@ -300,7 +300,7 @@ test('no_checkout uses offer_revealed after 10 minutes', () => {
   const evaluation = buildRecoveryCandidate(context, new Date('2026-04-30T11:30:01.000Z'))
   assert.ok(evaluation.candidate)
   assert.equal(evaluation.candidate?.message_type, 'no_checkout')
-  assert.equal(evaluation.candidate?.reason, 'no_checkout_due_after_25m_from_offer_revealed')
+  assert.equal(evaluation.candidate?.reason, 'no_checkout_due_after_10m_from_offer_revealed')
   assert.equal(evaluation.candidate?.trigger.event_type, 'offer_revealed')
   assert.equal(evaluation.candidate?.eligible_at, '2026-04-30T11:15:00.000Z')
   assert.equal(evaluation.candidate?.language, 'pt')
